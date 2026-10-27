@@ -34,7 +34,6 @@ import { ITEMS, PRODUCT_CATALOG, SUPPLIERS, BUYERS, type ModuleDef, type Row } f
 import { useStore } from "@/lib/store";
 import { parseLines, validateData, round, normalize, parseBuys } from "@/lib/workflow";
 import { Button } from "./ui/button";
-import { WorkflowStageBanner } from "./WorkflowStageBanner";
 import { cn } from "@/lib/utils";
 
 type BuyerDemandItem = {
@@ -697,7 +696,6 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <WorkflowStageBanner currentSlug="demand-plan" />
       {/* Top Header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>

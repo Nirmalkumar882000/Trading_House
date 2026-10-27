@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Boxes, Download, Search, ArrowRight, RotateCcw, Package, CheckCircle2, AlertTriangle, Layers, MapPin } from 'lucide-react';
 import { Button } from './ui/button';
-import { WorkflowStageBanner } from './WorkflowStageBanner';
 import { useStore } from '@/lib/store';
 import { lines, movements, stock, type Category, locations } from '@/lib/workflow';
 import { PRODUCT_CATALOG, type ModuleDef } from '@/lib/modules';
@@ -126,7 +125,6 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <WorkflowStageBanner currentSlug={mod.slug} />
       {/* Header section */}
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>

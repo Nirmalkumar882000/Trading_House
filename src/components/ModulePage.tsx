@@ -22,7 +22,6 @@ import { BuyerDemandModal } from "./BuyerDemandModal";
 import { ReturnContainerModal } from "./ReturnContainerModal";
 import { ContainerReturnChallanModal } from "./ContainerReturnChallanModal";
 import { StatusBadge } from "./StatusBadge";
-import { WorkflowStageBanner } from "./WorkflowStageBanner";
 import { cn } from "@/lib/utils";
 import { outstandingDemand } from "@/lib/sourcing";
 import { Button } from "./ui/button";
@@ -239,7 +238,6 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <WorkflowStageBanner currentSlug={mod.slug} />
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold lg:text-3xl">{mod.title}</h1>

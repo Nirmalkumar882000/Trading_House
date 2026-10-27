@@ -8,7 +8,6 @@ import { StatusBadge } from "./StatusBadge";
 import { QrStickerModal } from "./QrStickerModal";
 import { EmployeeSelect } from "./EmployeeSelect";
 import { Button } from "./ui/button";
-import { WorkflowStageBanner } from "./WorkflowStageBanner";
 import { cn } from "@/lib/utils";
 import { lines, normalize, num, round, validateData, bagBreakdown, parseLines, type Data } from "@/lib/workflow";
 
@@ -330,7 +329,6 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <WorkflowStageBanner currentSlug="packing" />
       <div>
         <p className="text-xs font-semibold uppercase tracking-wider text-primary">{mod.stage} · {mod.flows}</p>
         <h1 className="mt-1 text-2xl font-semibold lg:text-3xl">{mod.title}</h1>

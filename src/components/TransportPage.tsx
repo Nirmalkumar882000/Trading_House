@@ -33,7 +33,6 @@ import type { ModuleDef, Row } from "@/lib/modules";
 import { PRODUCT_CATALOG } from "@/lib/modules";
 import { useStore } from "@/lib/store";
 import { StatusBadge } from "./StatusBadge";
-import { WorkflowStageBanner } from "./WorkflowStageBanner";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -345,7 +344,6 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <WorkflowStageBanner currentSlug="transport" />
       {/* Top Header */}
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
