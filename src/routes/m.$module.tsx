@@ -6,6 +6,7 @@ import { StockPage } from "@/components/StockPage";
 import { PackingPage } from "@/components/PackingPage";
 import { QualityPage } from "@/components/QualityPage";
 import { DemandPlan } from "@/components/DemandPlan";
+import { TransportPage } from "@/components/TransportPage";
 import { OpenPointsRegister } from "@/components/OpenPointsRegister";
 import { ProcessFlowMap } from "@/components/ProcessFlowMap";
 import { BusinessProfilePage } from "@/components/BusinessProfilePage";
@@ -49,5 +50,6 @@ function ModuleRoute() {
   if (slug === "demand-plan") return <DemandPlan mod={mod} />;
   if (slug === "quality-check") return <QualityPage mod={mod} />;
   if (slug === "packing") return <PackingPage mod={mod} />;
+  if (slug === "transport") return <TransportPage mod={mod} />;
   return <ModulePage key={slug} mod={mod} />;
 }

@@ -102,4 +102,59 @@ describe('Integrated stock workflow',()=>{
     const dispatchedPacked = stock(d).find((s) => s.product === 'Tomato' && s.category === 'Packed')?.qty || 0;
     expect(dispatchedPacked).toBe(initialPacked - 10);
   });
+  it('allows creating trip and transport from demand consolidation modal', () => {
+    const d = demo();
+    const tripId = 'TRP-1009';
+    const movId = 'MOV-1007';
+    const tripItems = [
+      { product: 'Amaranth Green Leaves (Arai Keerai)', qty: 27.143, rate: 28 },
+      { product: 'Amaranth Red Leaves (Red Mulai Keerai)', qty: 15, rate: 28 },
+      { product: 'Banana Poovan Semi Ripe', qty: 25, rate: 28 }
+    ];
+    const tripTotalNet = 67.143;
+    const buys = tripItems.map(i => ({ s: 'Murugan Traders', p: i.product, q: i.qty, r: i.rate }));
+    const newTrip = normalize('trips', {
+      id: tripId,
+      status: 'Submitted',
+      date: '2026-10-27',
+      dc: 'DC-MKT-4442',
+      buys: JSON.stringify(buys),
+      item: JSON.stringify(tripItems.map(i => ({ p: i.product, q: i.qty }))),
+      supplier: 'Murugan Traders',
+      net: tripTotalNet,
+      rate: 28,
+      amount: 1880.004,
+      containerType: 'Plastic crates (~20-25 kg)',
+      containerCount: 4,
+      transporter: 'Chennai Fresh Logistics',
+      vehicle: 'TN 09 AB 1234',
+      driver: 'Raja',
+      signatures: '3',
+      responsible: 'Ravi Kumar',
+      po: 'PO-1001'
+    });
+    const newTransport = normalize('transport', {
+      id: movId,
+      date: '2026-10-27',
+      direction: 'Inward',
+      ref: tripId,
+      transporter: 'Chennai Fresh Logistics',
+      vehicle: 'TN 09 AB 1234',
+      driver: 'Raja',
+      driverPhone: '9840012345',
+      qty: tripTotalNet,
+      charges: 600,
+      status: 'Delivered',
+      responsible: 'Ravi Kumar',
+      supplier: 'Murugan Traders',
+      item: JSON.stringify(tripItems.map(i => ({ p: i.product, q: i.qty })))
+    });
+    const testData = {
+      ...d,
+      trips: [...(d['trips'] || []), newTrip],
+      transport: [...(d['transport'] || []), newTransport]
+    };
+    const err = validateData(testData);
+    expect(err).toBeNull();
+  });
 });

@@ -7,6 +7,7 @@ import {
   Receipt, FileText, AlertCircle, ArrowRight
 } from "lucide-react";
 import { Button } from "./ui/button";
+import { WorkflowStageBanner } from "./WorkflowStageBanner";
 import { toast } from "sonner";
 import { useStore } from "@/lib/store";
 import { num, round, buysFromTrip, lines, parseLines } from "@/lib/workflow";
@@ -642,6 +643,7 @@ export function LedgersPage({ mod }: { mod?: ModuleDef }) {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
+      <WorkflowStageBanner currentSlug="financial-ledgers" />
       {/* Header Banner */}
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>

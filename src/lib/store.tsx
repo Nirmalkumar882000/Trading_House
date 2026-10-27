@@ -6,7 +6,7 @@ import type { UserRole } from "./rbac";
 type Data = Record<string, Row[]>;
 const STORAGE_KEY = "trading-house-data";
 const ROLE_STORAGE_KEY = "trading-house-role";
-const CLEAN_VERSION_KEY = "trading-house-portal-clean-v7";
+const CLEAN_VERSION_KEY = "trading-house-portal-clean-v9";
 
 // Default demo initial data with rich produce records, clean quantities and packet counts
 const initial = (): Data => Object.fromEntries(MODULES.map((m) => [m.slug, []]));

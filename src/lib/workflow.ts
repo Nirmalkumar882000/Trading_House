@@ -269,7 +269,11 @@ export const references: Record<string, Record<string,string>> = {
   'supplier-prices':{dc:'trips'}, transport:{transporter:'transporters',ref:'trips'},
 };
 export function referenceModule(slug: string, key: string, r: Row) {
-  if (slug === 'transport' && key === 'ref' && r['direction'] === 'Outward') return 'sales-orders';
+  if (slug === 'transport' && key === 'ref') {
+    if (r['direction'] === 'Outward') return 'sales-orders';
+    if (r['direction'] === 'Outward Return') return 'returns';
+    return 'trips';
+  }
   return references[slug]?.[key];
 }
 export function populate(slug: string, key: string, value: string, form: Row, data: Data): Row {
@@ -333,7 +337,27 @@ export function populate(slug: string, key: string, value: string, form: Row, da
     r={...r,buyer:ref['buyer'] || '',item:JSON.stringify(ls)};
   }
   if (slug === 'returns') r={...r,buyer:ref['buyer'] || '',item:JSON.stringify(lines(ref).map(l=>({...l,q:0})))};
-  if (slug === 'dispatch' || slug === 'transport') r={...r,buyer:ref['buyer'] || '',item:ref['item'] || '',qty:num(ref['qty']) || num(ref['net']),supplier:ref['supplier'] || ''};
+  if (slug === 'dispatch') r={...r,buyer:ref['buyer'] || '',item:ref['item'] || '',qty:num(ref['qty']) || num(ref['net']),supplier:ref['supplier'] || ''};
+  if (slug === 'transport') {
+    const tripBuys = ref['buys'] ? parseBuys(ref['buys']) : [];
+    const sup = ref['supplier'] || (tripBuys.length > 0 ? [...new Set(tripBuys.map(b => b.s).filter(Boolean))].join(', ') : '');
+    const items = ref['item'] || (tripBuys.length > 0 ? JSON.stringify(tripBuys.map(b => ({ p: b.p, q: b.q, r: b.r }))) : '[]');
+    const qtyVal = num(ref['qty']) || num(ref['net']) || (parseLines(items).length > 0 ? total(parseLines(items)) : 0);
+    r = {
+      ...r,
+      buyer: ref['buyer'] || '',
+      supplier: sup || ref['supplier'] || '',
+      item: items,
+      qty: qtyVal,
+      transporter: ref['transporter'] || r['transporter'] || '',
+      vehicle: ref['vehicle'] || r['vehicle'] || '',
+      driver: ref['driver'] || r['driver'] || '',
+      driverPhone: ref['driverPhone'] || r['driverPhone'] || '',
+      containerType: ref['containerType'] || r['containerType'] || 'Plastic crates',
+      containerCount: num(ref['containerCount']) || num(r['containerCount']) || 0,
+      charges: num(ref['charges']) || num(r['charges']) || 0,
+    };
+  }
   if (slug === 'deliveries') r={...r,buyer:ref['buyer'] || '',accepted:num(ref['qty']),issueQty:0};
   if (slug === 'invoices') { const sale=(data['sales-orders'] || []).find(x=>x.id===ref['so']); r={...r,buyer:ref['buyer'] || '',taxable:num(sale?.['value'])}; }
   if (slug === 'supplier-prices') {
@@ -401,22 +425,39 @@ export function validateData(data: Data): string | null {
       if (slug==='packing') {
         if (num(r['packSize'])<=0) return 'Bag size must be greater than zero KG.';
         const po=(data['purchase-orders'] || []).find(x=>x.id===r['po']); if (r['po'] && (!po || po.status==='Rejected')) return 'Select an accepted buyer demand.';
-        if (po) for (const l of ls) { const allocated=(data['packing'] || []).filter(x=>x['po']===r['po']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0); if (allocated>(lines(po).find(x=>x.p===l.p)?.q || 0)+0.001) return `${l.p}: allocation exceeds buyer demand.`; }
+        if (po) for (const l of ls) {
+          const allocated=(data['packing'] || []).filter(x=>x['po']===r['po']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0);
+          const poLs = lines(po); const totalBase = poLs.reduce((s, x) => s + x.q, 0); const poLine = poLs.find(x => x.p === l.p);
+          const extra = num(po['extraKg']); const extraShare = extra > 0 && poLine ? (totalBase > 0 ? (extra * poLine.q / totalBase) : (extra / Math.max(1, poLs.length))) : 0;
+          const maxAllowed = (poLine?.q || 0) + extraShare;
+          if (allocated > maxAllowed + 0.001) return `${l.p}: allocation exceeds buyer demand.`;
+        }
       }
       if (slug==='sales-orders') {
         const po=(data['purchase-orders'] || []).find(x=>x.id===r['po']); if (!po) return `${r.id}: select the buyer demand to supply.`;
         if (po['buyer']!==r['buyer']) return 'Sale buyer must match the buyer demand.';
-        for (const l of ls) { const sold=(data['sales-orders'] || []).filter(x=>x['po']===r['po']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0); if (sold>(lines(po).find(x=>x.p===l.p)?.q || 0)+0.001) return `${l.p}: sale exceeds buyer demand.`; }
+        for (const l of ls) {
+          const sold=(data['sales-orders'] || []).filter(x=>x['po']===r['po']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0);
+          const poLs = lines(po); const totalBase = poLs.reduce((s, x) => s + x.q, 0); const poLine = poLs.find(x => x.p === l.p);
+          const extra = num(po['extraKg']); const extraShare = extra > 0 && poLine ? (totalBase > 0 ? (extra * poLine.q / totalBase) : (extra / Math.max(1, poLs.length))) : 0;
+          const maxAllowed = (poLine?.q || 0) + extraShare;
+          if (sold > maxAllowed + 0.001) return `${l.p}: sale exceeds buyer demand.`;
+        }
       }
       if (slug==='returns') {
         const sale=(data['sales-orders'] || []).find(x=>x.id===r['sale']); if (!sale || !activeSale(sale)) return 'Returns require an original dispatched sale.';
         for (const l of ls) { const returned=(data['returns'] || []).filter(x=>x['sale']===r['sale']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0); if (returned>(lines(sale).find(x=>x.p===l.p)?.q || 0)+0.001) return `${l.p}: returned quantity exceeds original sale.`; }
       }
       if (slug==='dispatch' || slug==='transport') {
-        const inward=slug==='transport' && r['direction']==='Inward'; const key=slug==='dispatch'?'so':'ref'; const ref=(data[inward?'trips':'sales-orders'] || []).find(x=>x.id===r[key]); if (!ref) return 'Select a valid purchase or sales reference.';
-        if (!inward && !activeSale(ref)) return 'Outward transport requires a dispatched sale.';
-        if ((data[slug] || []).filter(x=>x[key]===r[key] && (slug==='dispatch' || x['direction']===r['direction'])).length>1) return 'Transport already exists for this reference.';
-        if (num(r['qty'])>total(lines(ref,inward?'net':'qty'))+0.001) return 'Loading quantity exceeds referenced quantity.';
+        const inward = slug === 'transport' && (r['direction'] === 'Inward' || r['direction'] === 'Inward Return');
+        const outwardReturn = slug === 'transport' && r['direction'] === 'Outward Return';
+        const key = slug === 'dispatch' ? 'so' : 'ref';
+        const targetModule = inward ? 'trips' : outwardReturn ? 'returns' : 'sales-orders';
+        const ref = (data[targetModule] || []).find(x => x.id === r[key]);
+        if (!ref) return 'Select a valid purchase, return, or sales reference.';
+        if (!inward && !outwardReturn && !activeSale(ref)) return 'Outward transport requires a dispatched sale.';
+        if ((data[slug] || []).filter(x => x[key] === r[key] && (slug === 'dispatch' || x['direction'] === r['direction'])).length > 1) return 'Transport already exists for this reference.';
+        if (num(r['qty']) > total(lines(ref, inward ? 'net' : 'qty')) + 0.001) return 'Loading quantity exceeds referenced quantity.';
       }
     }
   }

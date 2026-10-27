@@ -22,6 +22,7 @@ import { BuyerDemandModal } from "./BuyerDemandModal";
 import { ReturnContainerModal } from "./ReturnContainerModal";
 import { ContainerReturnChallanModal } from "./ContainerReturnChallanModal";
 import { StatusBadge } from "./StatusBadge";
+import { WorkflowStageBanner } from "./WorkflowStageBanner";
 import { cn } from "@/lib/utils";
 import { outstandingDemand } from "@/lib/sourcing";
 import { Button } from "./ui/button";
@@ -33,6 +34,7 @@ function getCreateButtonLabel(slug: string, title: string): string {
   if (slug === "purchase-orders") return "New Demand";
   if (slug === "receipts") return "New GRN";
   if (slug === "containers") return "New Returnable";
+  if (slug === "transport") return "New Movement";
   return `New ${(title.split(" ")[0] ?? "").replace(/s$/, "")}`;
 }
 
@@ -51,7 +53,13 @@ const fmt = (f: Field, v: unknown, role: string) => {
   if (f.type === "products") return parseLines(v).map((l) => (l.q ? `${l.p} (${l.q})` : l.p)).join(", ") || "—";
   if (f.key === "extraKg") {
     const val = Number(v) || 0;
-    return val > 0 ? `+${val.toLocaleString("en-IN")} kg` : "—";
+    return val > 0 ? (
+      <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-700 dark:text-amber-400">
+        +{val.toLocaleString("en-IN")} kg
+      </span>
+    ) : (
+      <span className="text-muted-foreground">—</span>
+    );
   }
   if (f.money) return fmtMoney(v);
   if (f.type === "number") return `${Number(v).toLocaleString("en-IN")}${f.suffix ? " " + f.suffix : ""}`;
@@ -231,6 +239,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
+      <WorkflowStageBanner currentSlug={mod.slug} />
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold lg:text-3xl">{mod.title}</h1>
@@ -424,7 +433,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                           </Button>
                         </>
                       )}
-                      {mod.slug === "trips" && (
+                      {(mod.slug === "trips" || mod.slug === "transport") && (
                         <Button variant="ghost" title="View Transport Delivery Challan (F04)" onClick={() => setChallanRow(r)} className="rounded-md p-1.5 text-primary hover:bg-primary-soft">
                           <FileText className="size-4" />
                         </Button>
@@ -716,7 +725,7 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
           <Button variant="ghost" type="button" onClick={onClose} aria-label="Close"><X className="size-5" /></Button>
         </div>
         <div className="grid gap-4 p-5 sm:grid-cols-2">
-          {mod.fields.map((f) => (
+          {mod.fields.filter(f => !(mod.slug === "purchase-orders" && (f.key === "extraKg" || f.key === "qty"))).map((f) => (
             <div key={f.key} className={cn("space-y-1.5", (f.type === "textarea" || f.type === "products" || f.type === "buys") && "sm:col-span-2")}>
               <label htmlFor={`field-${f.key}`} className="text-xs font-semibold text-muted-foreground">
                 {f.label}{f.required && <span className="text-destructive"> *</span>}{f.suffix && ` (${f.suffix})`}{!priceEditable && (f.money || f.key === "rate" || f.key === "price") && " · Back office only"}

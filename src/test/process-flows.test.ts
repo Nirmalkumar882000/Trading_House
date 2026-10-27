@@ -302,4 +302,90 @@ describe("Trading House F01-F28 & C01-C14 Business Rules", () => {
     expect(assigned.includes(lineItem1.grader)).toBe(true);
     expect(assigned.includes(lineItem2.grader)).toBe(true);
   });
+
+  it("Inward Return: creates movement returning rejected produce or empty crates back to supplier stall at market and validates correctly", () => {
+    const d = demo();
+
+    const inwardReturnMovement = normalize("transport", {
+      id: "MOV-3001",
+      date: "2026-10-27",
+      direction: "Inward Return",
+      supplier: "Murugan Traders",
+      ref: "TRP-1001",
+      item: JSON.stringify([{ p: "Tomato", q: 15, r: 42, reason: "QC Rejection: Rotting & Pest" }]),
+      qty: 15,
+      containerType: "Plastic crates (~20-25 kg)",
+      containerCount: 10,
+      transporter: "Chennai Fresh Logistics",
+      vehicle: "TN 09 AB 1234",
+      driver: "Raja",
+      driverPhone: "9840012345",
+      charges: 350,
+      status: "Scheduled",
+      dc: "RET-DC-3001",
+      responsible: "Ravi Kumar",
+    });
+
+    const updatedData = {
+      ...d,
+      transport: [...(d["transport"] || []), inwardReturnMovement],
+    };
+
+    const err = validateData(updatedData);
+    expect(err).toBeNull();
+    expect(inwardReturnMovement["direction"]).toBe("Inward Return");
+    expect(inwardReturnMovement["supplier"]).toBe("Murugan Traders");
+  });
+
+  it("Outward Return: creates return record and movement from buyer, validates against original sales order, and handles reverse logistics", () => {
+    const d = demo();
+
+    // Pick existing sales order
+    const so = (d["sales-orders"] || [])[0];
+    expect(so).toBeDefined();
+
+    // 1. Create return record
+    const returnRecord = normalize("returns", {
+      id: "RDC-3001",
+      date: "2026-10-27",
+      sale: so.id,
+      buyer: so["buyer"],
+      item: JSON.stringify([{ p: "Tomato", q: 2, r: 40 }]),
+      qty: 2,
+      reason: "Quality issue",
+      status: "Received",
+      responsible: "Ravi Kumar",
+    });
+
+    // 2. Create transport movement linked to return record
+    const transportRecord = normalize("transport", {
+      id: "MOV-3002",
+      date: "2026-10-27",
+      direction: "Outward Return",
+      buyer: so["buyer"],
+      ref: "RDC-3001",
+      item: JSON.stringify([{ p: "Tomato", q: 2, r: 40 }]),
+      qty: 2,
+      containerType: "Plastic crates (~20-25 kg)",
+      containerCount: 3,
+      transporter: "Chennai Fresh Logistics",
+      vehicle: "TN 09 AB 1234",
+      driver: "Raja",
+      charges: 250,
+      status: "Scheduled",
+      responsible: "Ravi Kumar",
+    });
+
+    const updatedData = {
+      ...d,
+      returns: [...(d["returns"] || []), returnRecord],
+      transport: [...(d["transport"] || []), transportRecord],
+    };
+
+    const err = validateData(updatedData);
+    expect(err).toBeNull();
+    expect(transportRecord["direction"]).toBe("Outward Return");
+    expect(transportRecord["ref"]).toBe("RDC-3001");
+  });
 });
+

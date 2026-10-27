@@ -26,6 +26,7 @@ import { PRODUCT_CATALOG } from "@/lib/modules";
 import { useStore } from "@/lib/store";
 import { StatusBadge } from "./StatusBadge";
 import { Button } from "./ui/button";
+import { WorkflowStageBanner } from "./WorkflowStageBanner";
 import { EmployeeSelect } from "./EmployeeSelect";
 import { cn } from "@/lib/utils";
 import { lines, normalize, num, parseLines, populate, returnsAvailable, round, validateData, type ProductLine } from "@/lib/workflow";
@@ -253,6 +254,7 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
+      <WorkflowStageBanner currentSlug="quality-check" />
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-primary">
