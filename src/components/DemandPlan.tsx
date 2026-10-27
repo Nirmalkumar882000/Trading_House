@@ -28,6 +28,10 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   ArrowLeftRight,
+  Trash2,
+  Plus,
+  UserCheck,
+  Phone,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ITEMS, PRODUCT_CATALOG, SUPPLIERS, BUYERS, type ModuleDef, type Row } from "@/lib/modules";
@@ -57,11 +61,21 @@ type ProductPlan = {
 
 interface TripModalItem {
   product: string;
+  supplier: string;
   qty: number;
   rate: number;
+  totalDemand: number;
   baseDemand: number;
   extraKg: number;
+  containerType: string;
+  boxCount: number;
   buyersCount: number;
+}
+
+interface InwardReturnItem {
+  supplier: string;
+  containerType: string;
+  returnCount: number;
 }
 
 export function DemandPlan({ mod }: { mod: ModuleDef }) {
@@ -90,7 +104,23 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
   const [tripContainerCount, setTripContainerCount] = useState<number>(0);
   const [tripDc, setTripDc] = useState<string>("");
   const [tripDate, setTripDate] = useState<string>(new Date().toISOString().slice(0, 10));
-  const [tripStatus, setTripStatus] = useState<"Submitted" | "Loading" | "Draft">("Submitted");
+  const [tripTime, setTripTime] = useState<string>(() =>
+    new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
+  );
+  const [tripStatus, setTripStatus] = useState<string>("Submitted");
+  const [tripFromLocation, setTripFromLocation] = useState<string>("Koyambedu Wholesale Mandi (Supplier Stall)");
+  const [tripToLocation, setTripToLocation] = useState<string>("Velaan Bay Warehouse (Receiving Bay)");
+  const [tripManagerName, setTripManagerName] = useState<string>("Suresh Kumar (Purchase Manager)");
+  const [tripManagerPhone, setTripManagerPhone] = useState<string>("9840234567");
+
+  // Inward Return Container Lines
+  const [returnItems, setReturnItems] = useState<InwardReturnItem[]>([
+    {
+      supplier: "Murugan Traders",
+      containerType: "Plastic crates",
+      returnCount: 10,
+    },
+  ]);
 
   // Transport Tracking State
   const [transportFilterTab, setTransportFilterTab] = useState<
@@ -258,19 +288,30 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       }
 
       const targetQty = p.balance > 0 ? p.balance : p.demand;
+      const defaultContainer =
+        p.product.toLowerCase().includes("onion") || p.product.toLowerCase().includes("potato")
+          ? "Gunny bags"
+          : "Plastic crates";
+      const capacity = defaultContainer === "Gunny bags" ? 50 : defaultContainer === "Carton boxes" ? 15 : 20;
+      const defaultBoxCount = Math.max(1, Math.ceil(targetQty / capacity));
 
       return {
         product: p.product,
+        supplier: suppliersList[0] || "Murugan Traders",
         qty: targetQty,
         rate: defaultRate,
+        totalDemand: p.demand,
         baseDemand: p.baseDemand,
         extraKg: p.extraKg,
+        containerType: defaultContainer,
+        boxCount: defaultBoxCount,
         buyersCount: p.buyers.length,
       };
     });
 
     const totalNet = items.reduce((s, i) => s + i.qty, 0);
-    const suggestedCrates = Math.max(1, Math.ceil(totalNet / 20));
+    const totalBoxes = items.reduce((s, i) => s + (i.boxCount || 0), 0);
+    const suggestedCrates = totalBoxes || Math.max(1, Math.ceil(totalNet / 20));
 
     // Auto-generate DC
     const existingDcs = (data["trips"] ?? []).map((t) => String(t["dc"] || "")).filter(Boolean);
@@ -292,13 +333,54 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     setTripVehicle(defaultTransporter?.vehicle || "TN 09 AB 1234");
     setTripDriver(defaultTransporter?.driver || "Raja");
     setTripDriverPhone(defaultTransporter?.phone || "9840012345");
-    setTripCharges(600);
+    setTripCharges(direction === "Inward Return" ? 350 : 600);
     setTripContainerType("Plastic crates");
-    setTripContainerCount(suggestedCrates);
-    setTripDc(`DC-MKT-${nextDcNum}`);
+    const initialCrates = direction === "Inward Return" ? 10 : suggestedCrates;
+    setTripContainerCount(initialCrates);
+    setReturnItems([
+      {
+        supplier: suppliersList[0] || "Murugan Traders",
+        containerType: "Plastic crates",
+        returnCount: initialCrates,
+      },
+    ]);
+    setTripDc(direction === "Inward Return" ? `DC-RET-${nextDcNum}` : `DC-MKT-${nextDcNum}`);
     setTripDate(new Date().toISOString().slice(0, 10));
-    setTripStatus("Submitted");
+    setTripTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
+    setTripStatus("Scheduled");
+    setTripFromLocation(
+      direction === "Inward Return"
+        ? "Velaan Bay Warehouse (Receiving Bay)"
+        : "Koyambedu Wholesale Mandi (Supplier Stall)"
+    );
+    setTripToLocation(
+      direction === "Inward Return"
+        ? "Koyambedu Wholesale Mandi (Supplier Stall)"
+        : "Velaan Bay Warehouse (Receiving Bay)"
+    );
+    setTripManagerName(
+      direction === "Inward Return"
+        ? "Karthik (Fleet & Bay Manager)"
+        : "Suresh Kumar (Purchase Manager)"
+    );
+    setTripManagerPhone("9840234567");
     setIsTripModalOpen(true);
+  };
+
+  // Open Market Trip confirmation for selected items or all pending demand products by default
+  const handleOpenDefaultTripModal = () => {
+    if (selectedProducts.size > 0) {
+      const selected = plans.filter((p) => selectedProducts.has(p.product));
+      openPlanTripModal(selected, "Inward");
+    } else {
+      const pending = plans.filter((p) => p.balance > 0);
+      const toPlan = pending.length > 0 ? pending : (plans.length > 0 ? plans : []);
+      if (!toPlan.length) {
+        toast.info("No demand products found. Please add a buyer PO first.");
+        return;
+      }
+      openPlanTripModal(toPlan, "Inward");
+    }
   };
 
   // Change transporter auto-fills vehicle & driver & phone
@@ -312,13 +394,155 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     }
   };
 
-  // Update item quantity or rate in trip modal
+  // Update item product in trip modal
+  const handleUpdateTripItemProduct = (index: number, newProduct: string) => {
+    setTripItems((prev) => {
+      const next = [...prev];
+      const item = next[index];
+      const foundPlan = plans.find((p) => p.product === newProduct);
+      const totalDemand = foundPlan ? foundPlan.demand : 0;
+      const baseDemand = foundPlan ? foundPlan.baseDemand : 0;
+      const extraKg = foundPlan ? foundPlan.extraKg : 0;
+      const targetQty = foundPlan ? (foundPlan.balance > 0 ? foundPlan.balance : foundPlan.demand) : item.qty || 25;
+
+      let defaultRate = item.rate || 28;
+      for (const t of data["trips"] ?? []) {
+        if (t["buys"]) {
+          const b = parseBuys(t["buys"]).find((x) => x.p === newProduct && (!item.supplier || x.s === item.supplier));
+          if (b && b.r > 0) {
+            defaultRate = b.r;
+            break;
+          }
+        }
+      }
+
+      const defaultContainer =
+        newProduct.toLowerCase().includes("onion") || newProduct.toLowerCase().includes("potato")
+          ? "Gunny bags"
+          : "Plastic crates";
+      const capacity = defaultContainer === "Gunny bags" ? 50 : defaultContainer === "Carton boxes" ? 15 : 20;
+      const newBoxCount = Math.max(1, Math.ceil(targetQty / capacity));
+
+      next[index] = {
+        ...item,
+        product: newProduct,
+        totalDemand,
+        baseDemand,
+        extraKg,
+        qty: targetQty,
+        rate: defaultRate,
+        containerType: defaultContainer,
+        boxCount: newBoxCount,
+        buyersCount: foundPlan ? foundPlan.buyers.length : 0,
+      };
+      const newTotalBoxes = next.reduce((s, i) => s + (i.boxCount || 0), 0);
+      setTripContainerCount(newTotalBoxes);
+      return next;
+    });
+  };
+
+  // Update item supplier in trip modal
+  const handleUpdateTripItemSupplier = (index: number, newSupplier: string) => {
+    setTripItems((prev) => {
+      const next = [...prev];
+      const item = next[index];
+      let supplierRate = item.rate;
+      for (const p of data["supplier-prices"] ?? []) {
+        if (p["supplier"] === newSupplier && p["item"]) {
+          const l = parseLines(p["item"]).find((x) => x.p === item.product);
+          if (l && Number(l.r) > 0) {
+            supplierRate = Number(l.r);
+            break;
+          }
+        }
+      }
+      next[index] = { ...item, supplier: newSupplier, rate: supplierRate };
+      return next;
+    });
+  };
+
+  // Add new product line to trip modal
+  const handleAddTripItem = () => {
+    const existingProducts = new Set(tripItems.map((i) => i.product));
+    const nextProduct = ITEMS.find((i) => !existingProducts.has(i)) || ITEMS[0];
+    const foundPlan = plans.find((p) => p.product === nextProduct);
+    const targetQty = foundPlan ? (foundPlan.balance > 0 ? foundPlan.balance : foundPlan.demand) : 25;
+    const defaultContainer =
+      nextProduct.toLowerCase().includes("onion") || nextProduct.toLowerCase().includes("potato")
+        ? "Gunny bags"
+        : "Plastic crates";
+    const capacity = defaultContainer === "Gunny bags" ? 50 : 20;
+    const boxCount = Math.max(1, Math.ceil(targetQty / capacity));
+
+    const newItem: TripModalItem = {
+      product: nextProduct,
+      supplier: tripSupplier || suppliersList[0] || "Murugan Traders",
+      qty: targetQty,
+      rate: 28,
+      totalDemand: foundPlan ? foundPlan.demand : 0,
+      baseDemand: foundPlan ? foundPlan.baseDemand : 0,
+      extraKg: foundPlan ? foundPlan.extraKg : 0,
+      containerType: defaultContainer,
+      boxCount,
+      buyersCount: foundPlan ? foundPlan.buyers.length : 0,
+    };
+
+    setTripItems((prev) => {
+      const next = [...prev, newItem];
+      const newTotalBoxes = next.reduce((s, i) => s + (i.boxCount || 0), 0);
+      setTripContainerCount(newTotalBoxes);
+      return next;
+    });
+  };
+
+  // Remove a product line from trip modal
+  const handleRemoveTripItem = (index: number) => {
+    setTripItems((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      const newTotalBoxes = next.reduce((s, i) => s + (i.boxCount || 0), 0);
+      setTripContainerCount(newTotalBoxes);
+      return next;
+    });
+  };
+
+  // Update item quantity in trip modal
   const handleUpdateTripItemQty = (index: number, qty: number) => {
     setTripItems((prev) => {
       const next = [...prev];
-      next[index] = { ...next[index], qty: Math.max(0, qty) };
-      const newTotalNet = next.reduce((s, i) => s + i.qty, 0);
-      setTripContainerCount(Math.max(1, Math.ceil(newTotalNet / 20)));
+      const validQty = Math.max(0, qty);
+      const item = next[index];
+      const capacity =
+        item.containerType === "Gunny bags" ? 50 : item.containerType === "Carton boxes" ? 15 : 20;
+      const newBoxCount = Math.max(1, Math.ceil(validQty / capacity));
+      next[index] = { ...item, qty: validQty, boxCount: newBoxCount };
+      const newTotalBoxes = next.reduce((s, i) => s + (i.boxCount || 0), 0);
+      setTripContainerCount(newTotalBoxes);
+      return next;
+    });
+  };
+
+  // Update item container type in trip modal
+  const handleUpdateTripItemContainer = (index: number, containerType: string) => {
+    setTripItems((prev) => {
+      const next = [...prev];
+      const item = next[index];
+      const capacity =
+        containerType === "Gunny bags" ? 50 : containerType === "Carton boxes" ? 15 : 20;
+      const newBoxCount = Math.max(1, Math.ceil(item.qty / capacity));
+      next[index] = { ...item, containerType, boxCount: newBoxCount };
+      const newTotalBoxes = next.reduce((s, i) => s + (i.boxCount || 0), 0);
+      setTripContainerCount(newTotalBoxes);
+      return next;
+    });
+  };
+
+  // Update item box count in trip modal
+  const handleUpdateTripItemBoxCount = (index: number, boxCount: number) => {
+    setTripItems((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], boxCount: Math.max(0, boxCount) };
+      const newTotalBoxes = next.reduce((s, i) => s + (i.boxCount || 0), 0);
+      setTripContainerCount(newTotalBoxes);
       return next;
     });
   };
@@ -333,16 +557,88 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
   // Calculate live trip modal totals
   const tripTotalNet = useMemo(() => round(tripItems.reduce((s, i) => s + i.qty, 0)), [tripItems]);
+  const tripTotalBoxes = useMemo(() => tripItems.reduce((s, i) => s + (i.boxCount || 0), 0), [tripItems]);
+  const tripTotalDemand = useMemo(
+    () => round(tripItems.reduce((s, i) => s + (i.totalDemand || 0), 0)),
+    [tripItems]
+  );
   const tripTotalAmount = useMemo(
     () => round(tripItems.reduce((s, i) => s + i.qty * (i.rate || 0), 0)),
     [tripItems]
   );
   const tripAvgRate = tripTotalNet > 0 ? round(tripTotalAmount / tripTotalNet) : 0;
 
+  // Total Return Containers Count
+  const totalReturnContainers = useMemo(
+    () => returnItems.reduce((acc, item) => acc + (Number(item.returnCount) || 0), 0),
+    [returnItems]
+  );
+
+  const handleAddReturnDetail = () => {
+    setReturnItems((prev) => [
+      ...prev,
+      {
+        supplier: prev[prev.length - 1]?.supplier || suppliersList[0] || "Murugan Traders",
+        containerType: prev[prev.length - 1]?.containerType || "Plastic crates",
+        returnCount: 10,
+      },
+    ]);
+  };
+
+  const handleRemoveReturnDetail = (idx: number) => {
+    setReturnItems((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleUpdateReturnDetail = (idx: number, field: keyof InwardReturnItem, val: any) => {
+    setReturnItems((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], [field]: val };
+      return next;
+    });
+  };
+
+  // WhatsApp Message for Inward Container Return
+  const sendWhatsAppForInwardReturn = (transport: Row, details: InwardReturnItem[]) => {
+    const detailsText = details
+      .map((d) => `• *${d.supplier}*: ${d.returnCount} units (${d.containerType})`)
+      .join("\n");
+
+    const message =
+      `*Velaan Bay — Inward Container Return & Vehicle Dispatch Order*\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `*Movement Type:* Inward Return (Bay ➔ Supplier)\n` +
+      `*Transport Movement Ref:* ${transport.id}\n` +
+      `*Delivery Challan (DC):* ${transport["dc"] || "—"}\n` +
+      `*Date & Time:* ${transport["date"]} at ${transport["time"] || "—"}\n` +
+      `*Route:* ${transport["fromLocation"] || "Velaan Bay"} ➔ ${transport["toLocation"] || "Koyambedu Mandi"}\n` +
+      `*Trip Status:* ${transport.status}\n\n` +
+      `*Returned Containers Breakdown:*\n${detailsText}\n\n` +
+      `*Total Return Count:* ${transport["containerCount"]} units\n` +
+      `*Fleet / Bay Manager:* ${transport["managerName"] || "Karthik (Fleet & Bay Manager)"} (Ph: ${transport["managerPhone"] || "9840234567"})\n` +
+      `*Transporter:* ${transport["transporter"]}\n` +
+      `*Vehicle No:* ${transport["vehicle"]}\n` +
+      `*Driver:* ${transport["driver"]} (Ph: ${transport["driverPhone"] || "—"})\n` +
+      `*Freight Charges:* ₹${Number(transport["charges"] || 0).toLocaleString("en-IN")}\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `_Warehouse Bay & Drivers: Inspect empty crates/containers upon dispatch and collect supplier gate acknowledgment receipt._`;
+
+    window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, "_blank", "noopener,noreferrer");
+  };
+
   // Confirm and create trip + auto-create transport movement
   const handleConfirmCreateTrip = (sendWhatsApp: boolean = false) => {
-    if (!tripItems.length || tripTotalNet <= 0) {
+    const isReturn = tripDirection === "Inward Return";
+
+    if (!isReturn && (!tripItems.length || tripTotalNet <= 0)) {
       toast.error("Please add at least one product with positive KG quantity.");
+      return;
+    }
+    if (isReturn && (!returnItems.length || totalReturnContainers <= 0)) {
+      toast.error("Please enter a valid container return count.");
+      return;
+    }
+    if (isReturn && returnItems.some((r) => !r.supplier)) {
+      toast.error("Please select a supplier for each return line.");
       return;
     }
     if (!tripVehicle.trim()) {
@@ -354,11 +650,72 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       return;
     }
 
-    const tripId = nextId("trips");
     const movId = nextId("transport");
 
+    if (isReturn) {
+      const uniqueSuppliers = [...new Set(returnItems.map((r) => r.supplier).filter(Boolean))];
+      const supplierSummary = uniqueSuppliers.join(", ") || tripSupplier;
+      const primarySupplier = uniqueSuppliers[0] || tripSupplier;
+      const primaryContainerType = returnItems[0]?.containerType || "Plastic crates";
+
+      const itemSummary = returnItems
+        .map((r) => `${r.returnCount} ${r.containerType} ➔ ${r.supplier}`)
+        .join("; ");
+
+      const returnMovement: Row = {
+        id: movId,
+        date: tripDate,
+        time: tripTime,
+        direction: "Inward Return",
+        supplier: supplierSummary,
+        party: primarySupplier,
+        transporter: tripTransporter,
+        vehicle: tripVehicle,
+        driver: tripDriver,
+        driverPhone: tripDriverPhone,
+        fromLocation: tripFromLocation,
+        toLocation: tripToLocation,
+        managerName: tripManagerName,
+        managerPhone: tripManagerPhone,
+        qty: 0,
+        containerType: returnItems.length === 1 ? primaryContainerType : "Mixed containers",
+        containerCount: totalReturnContainers,
+        charges: tripCharges || 350,
+        status: tripStatus,
+        responsible: "Ravi Kumar",
+        item: itemSummary,
+        dc: tripDc || `DC-RET-${Date.now().toString().slice(-4)}`,
+      };
+
+      const normalizedMovement = normalize("transport", returnMovement);
+      const err = validateData({
+        ...data,
+        transport: [...(data["transport"] ?? []), normalizedMovement],
+      });
+
+      if (err) {
+        toast.error(err);
+        return;
+      }
+
+      upsert("transport", normalizedMovement);
+      toast.success(
+        `Inward Return ${movId} scheduled! Returning ${totalReturnContainers} containers to ${supplierSummary} via ${tripVehicle}.`
+      );
+
+      if (sendWhatsApp) {
+        sendWhatsAppForInwardReturn(normalizedMovement, returnItems);
+      }
+
+      setIsTripModalOpen(false);
+      setSelectedProducts(new Set());
+      return;
+    }
+
+    const tripId = nextId("trips");
+
     const buys = tripItems.map((i) => ({
-      s: tripSupplier,
+      s: i.supplier || tripSupplier,
       p: i.product,
       q: i.qty,
       r: i.rate || 0,
@@ -367,20 +724,27 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     // Find PO reference from first product
     const firstProduct = plans.find((p) => p.product === tripItems[0]?.product);
     const poRef = firstProduct?.buyers[0]?.pos[0] || "";
+    const uniqueSuppliers = [...new Set(tripItems.map((i) => i.supplier || tripSupplier).filter(Boolean))];
+    const supplierSummary = uniqueSuppliers.join(", ") || tripSupplier;
 
     const newTrip: Row = {
       id: tripId,
       status: tripStatus,
       date: tripDate,
+      time: tripTime,
+      fromLocation: tripFromLocation,
+      toLocation: tripToLocation,
+      managerName: tripManagerName,
+      managerPhone: tripManagerPhone,
       dc: tripDc || `DC-MKT-4450`,
       buys: JSON.stringify(buys),
       item: JSON.stringify(tripItems.map((i) => ({ p: i.product, q: i.qty }))),
-      supplier: tripSupplier,
+      supplier: supplierSummary,
       net: tripTotalNet,
       rate: tripAvgRate,
       amount: tripTotalAmount,
       containerType: tripContainerType,
-      containerCount: tripContainerCount,
+      containerCount: tripTotalBoxes || tripContainerCount,
       transporter: tripTransporter,
       vehicle: tripVehicle,
       driver: tripDriver,
@@ -391,11 +755,17 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
     const normalizedTrip = normalize("trips", newTrip);
 
-    // Auto-create corresponding Inward or Inward Return Transport Movement
-    const transportStatus = tripStatus === "Submitted" ? "Delivered" : tripStatus === "Loading" ? "In transit" : "Scheduled";
+    // Auto-create corresponding Inward Transport Movement
+    const transportStatus =
+      tripStatus === "Submitted" || tripStatus === "Delivered"
+        ? "Delivered"
+        : tripStatus === "Loading" || tripStatus === "In transit"
+          ? "In transit"
+          : "Scheduled";
     const newTransport: Row = {
       id: movId,
       date: tripDate,
+      time: tripTime,
       direction: tripDirection,
       ref: tripId,
       supplier: tripSupplier,
@@ -404,6 +774,10 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       vehicle: tripVehicle,
       driver: tripDriver,
       driverPhone: tripDriverPhone,
+      fromLocation: tripFromLocation,
+      toLocation: tripToLocation,
+      managerName: tripManagerName,
+      managerPhone: tripManagerPhone,
       qty: tripTotalNet,
       containerType: tripContainerType,
       containerCount: tripContainerCount,
@@ -445,24 +819,21 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     const itemsText = items
       .map((i) => {
         const amt = round(i.qty * (i.rate || 0));
-        return `• *${i.product}*: ${i.qty.toLocaleString("en-IN")} kg @ ₹${i.rate}/kg = ₹${amt.toLocaleString("en-IN")}`;
+        return `• *${i.product}*: ${i.qty.toLocaleString("en-IN")} kg (${i.boxCount} ${i.containerType}) @ ₹${i.rate}/kg = ₹${amt.toLocaleString("en-IN")}`;
       })
       .join("\n");
 
-    const isReturn = transport["direction"] === "Inward Return";
-    const title = isReturn
-      ? "*Velaan Bay — Inward Supplier Return & Vehicle Dispatch Order*"
-      : "*Velaan Bay — Inward Market Procurement & Loading Order*";
-
     const message =
-      `${title}\n` +
+      `*Velaan Bay — Inward Market Procurement & Loading Order*\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `*Trip ID:* ${trip.id}\n` +
       `*Transport Movement Ref:* ${transport.id} (${transport["direction"]})\n` +
       `*Delivery Challan (DC):* ${trip["dc"]}\n` +
-      `*Trip Date:* ${trip["date"]}\n` +
+      `*Trip Date:* ${trip["date"]}${trip["time"] ? ` at ${trip["time"]}` : ""}\n` +
+      `*Route:* ${transport["fromLocation"] || "Koyambedu Mandi"} ➔ ${transport["toLocation"] || "Velaan Bay"}\n` +
       `*Status:* ${trip.status}\n\n` +
       `*Market Supplier:* ${trip["supplier"]} (Koyambedu Wholesale Mandi)\n` +
+      `*Fleet / Purchase Manager:* ${transport["managerName"] || trip["managerName"]} (Ph: ${transport["managerPhone"] || trip["managerPhone"] || "—"})\n` +
       `*Transporter:* ${trip["transporter"]}\n` +
       `*Vehicle No:* ${trip["vehicle"]}\n` +
       `*Driver:* ${trip["driver"]} (Ph: ${transport["driverPhone"] || "—"})\n` +
@@ -681,6 +1052,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       `*Date:* ${mov["date"]}\n` +
       `*Status:* ${mov["status"]}\n\n` +
       `*${mov.partyRole || "Party"}:* ${mov.partyName}\n` +
+      (mov["managerName"] ? `*Fleet / Purchase Manager:* ${mov["managerName"]} (Ph: ${mov["managerPhone"] || "—"})\n` : "") +
       `*Transporter:* ${mov["transporter"]}\n` +
       `*Vehicle Number:* ${mov["vehicle"]}\n` +
       `*Driver:* ${mov["driver"]} (Ph: ${mov["driverPhone"] || "—"})\n` +
@@ -718,6 +1090,12 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700"
           >
             <Share2 className="size-3.5" /> WhatsApp Mandi Sheet
+          </Button>
+          <Button
+            onClick={handleOpenDefaultTripModal}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3.5 py-2 text-xs font-semibold text-primary-foreground shadow-xs hover:opacity-90"
+          >
+            <ShoppingCart className="size-3.5" /> Plan Market Trip
           </Button>
         </div>
       </div>
@@ -794,53 +1172,94 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
         </div>
       </div>
 
-      {/* Multi-Selection Action Banner (when items are selected) */}
-      {selectedProducts.size > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary/10 p-3 shadow-md animate-in slide-in-from-top-2">
-          <div className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
-              {selectedProducts.size}
-            </span>
-            <span className="text-xs font-semibold text-foreground">
-              Products Selected ·{" "}
-              <span className="text-primary font-bold">
-                {plans
-                  .filter((p) => selectedProducts.has(p.product))
-                  .reduce((s, p) => s + (p.balance > 0 ? p.balance : p.demand), 0)
-                  .toLocaleString("en-IN")}{" "}
-                kg
-              </span>{" "}
-              procurement volume
-            </span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => handleWhatsAppProcurementSheet(true)}
-              className="h-8 text-xs font-medium bg-card text-emerald-700 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
-            >
-              <Share2 className="size-3.5 mr-1" /> WhatsApp Selected
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => openPlanTripModal(plans.filter((p) => selectedProducts.has(p.product)), "Inward")}
-              className="h-8 bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95"
-            >
-              <ShoppingCart className="size-3.5 mr-1.5" /> Plan Market Trip for Selected ({selectedProducts.size})
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setSelectedProducts(new Set())}
-              className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
-            >
-              Clear
-            </Button>
-          </div>
+      {/* Action Banner (Default Always Shown & Multi-Selection) */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/25 bg-primary/10 p-3 shadow-xs">
+        <div className="flex items-center gap-2">
+          {selectedProducts.size > 0 ? (
+            <>
+              <span className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+                {selectedProducts.size}
+              </span>
+              <span className="text-xs font-semibold text-foreground">
+                Products Selected ·{" "}
+                <span className="text-primary font-bold">
+                  {plans
+                    .filter((p) => selectedProducts.has(p.product))
+                    .reduce((s, p) => s + (p.balance > 0 ? p.balance : p.demand), 0)
+                    .toLocaleString("en-IN")}{" "}
+                  kg
+                </span>{" "}
+                procurement volume
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="flex size-6 items-center justify-center rounded-full bg-primary/20 text-xs font-bold text-primary">
+                {plans.length}
+              </span>
+              <span className="text-xs font-semibold text-foreground">
+                Active Demand Items ·{" "}
+                <span className="text-primary font-bold">
+                  {totalBalance > 0
+                    ? `${totalBalance.toLocaleString("en-IN")} kg pending purchase`
+                    : `${totalDemand.toLocaleString("en-IN")} kg total demand`}
+                </span>
+                <span className="text-muted-foreground ml-1.5 font-normal hidden sm:inline">
+                  (select products or plan directly)
+                </span>
+              </span>
+            </>
+          )}
         </div>
-      )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          {selectedProducts.size > 0 ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleWhatsAppProcurementSheet(true)}
+                className="h-8 text-xs font-medium bg-card text-emerald-700 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
+              >
+                <Share2 className="size-3.5 mr-1" /> WhatsApp Selected
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => openPlanTripModal(plans.filter((p) => selectedProducts.has(p.product)), "Inward")}
+                className="h-8 bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95"
+              >
+                <ShoppingCart className="size-3.5 mr-1.5" /> Plan Market Trip for Selected ({selectedProducts.size})
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setSelectedProducts(new Set())}
+                className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                Clear
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleWhatsAppProcurementSheet(false)}
+                className="h-8 text-xs font-medium bg-card text-emerald-700 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
+              >
+                <Share2 className="size-3.5 mr-1" /> WhatsApp Mandi Sheet
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleOpenDefaultTripModal}
+                className="h-8 bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95"
+              >
+                <ShoppingCart className="size-3.5 mr-1.5" /> Plan Market Trip
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
 
       {/* Main Consolidation Table Card */}
       <div className="overflow-hidden rounded-2xl border bg-card shadow-card">
@@ -1249,8 +1668,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                         isDelivered
                           ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
                           : isInTransit
-                          ? "bg-blue-500/15 text-blue-700 dark:text-blue-400"
-                          : "bg-amber-500/15 text-amber-800 dark:text-amber-300"
+                            ? "bg-blue-500/15 text-blue-700 dark:text-blue-400"
+                            : "bg-amber-500/15 text-amber-800 dark:text-amber-300"
                       )}
                     >
                       {mov.status}
@@ -1294,6 +1713,23 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                       <div className="flex justify-between">
                         <span className="text-muted-foreground">Packaging:</span>
                         <span className="font-medium text-foreground">{mov.containerText}</span>
+                      </div>
+                    )}
+                    {(mov.fromLocation || mov.toLocation) && (
+                      <div className="flex items-start justify-between gap-1 text-[11px] pt-1 border-t">
+                        <span className="text-muted-foreground shrink-0">Route:</span>
+                        <span className="font-medium text-foreground text-right truncate">
+                          {mov.fromLocation || "Origin"} ➔ {mov.toLocation || "Destination"}
+                        </span>
+                      </div>
+                    )}
+                    {mov["managerName"] && (
+                      <div className="flex justify-between text-[11px]">
+                        <span className="text-muted-foreground">Manager:</span>
+                        <span className="font-medium text-foreground truncate max-w-[170px]" title={String(mov["managerName"])}>
+                          {String(mov["managerName"])}
+                          {mov["managerPhone"] ? ` · ${mov["managerPhone"]}` : ""}
+                        </span>
                       </div>
                     )}
                   </div>
@@ -1370,7 +1806,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       {isTripModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="fixed inset-0 bg-foreground/50 backdrop-blur-xs" onClick={() => setIsTripModalOpen(false)} />
-          <div className="relative w-full max-w-3xl max-h-[92vh] overflow-y-auto rounded-2xl bg-card p-6 shadow-2xl border animate-in zoom-in-95 space-y-5">
+          <div className="relative w-full max-w-5xl max-h-[92vh] overflow-y-auto rounded-2xl bg-card p-6 shadow-2xl border animate-in zoom-in-95 space-y-5">
             <div className="flex items-start justify-between border-b pb-4">
               <div>
                 <div className="flex items-center gap-2">
@@ -1394,7 +1830,9 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                     : "Confirm Inward Return & Supplier Return Vehicle"}
                 </h2>
                 <p className="text-xs text-muted-foreground">
-                  Creates both the Market Trip and the linked Inward Transport Movement with vehicle, driver, and container packaging.
+                  {tripDirection === "Inward"
+                    ? "Creates both the Market Trip and the linked Inward Transport Movement with vehicle, driver, and container packaging."
+                    : "Creates the Inward Return Transport Movement with supplier, container count, vehicle, driver, and dispatch schedule."}
                 </p>
               </div>
               <Button
@@ -1413,7 +1851,13 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setTripDirection("Inward")}
+                  onClick={() => {
+                    setTripDirection("Inward");
+                    setTripFromLocation("Koyambedu Wholesale Mandi (Supplier Stall)");
+                    setTripToLocation("Velaan Bay Warehouse (Receiving Bay)");
+                    setTripManagerName("Suresh Kumar (Purchase Manager)");
+                    setTripManagerPhone("9840234567");
+                  }}
                   className={cn(
                     "px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition-all",
                     tripDirection === "Inward"
@@ -1425,7 +1869,22 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTripDirection("Inward Return")}
+                  onClick={() => {
+                    setTripDirection("Inward Return");
+                    setTripFromLocation("Velaan Bay Warehouse (Receiving Bay)");
+                    setTripToLocation("Koyambedu Wholesale Mandi (Supplier Stall)");
+                    setTripManagerName("Karthik (Fleet & Bay Manager)");
+                    setTripManagerPhone("9840234567");
+                    if (!returnItems.length) {
+                      setReturnItems([
+                        {
+                          supplier: suppliersList[0] || "Murugan Traders",
+                          containerType: "Plastic crates",
+                          returnCount: 10,
+                        },
+                      ]);
+                    }
+                  }}
                   className={cn(
                     "px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition-all",
                     tripDirection === "Inward Return"
@@ -1438,233 +1897,669 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
               </div>
             </div>
 
-            {/* Step 1: Products and Purchase Quantities */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  Products to Procure ({tripItems.length})
-                </h3>
-                <span className="text-xs font-semibold text-primary">
-                  Net Weight: {tripTotalNet.toLocaleString("en-IN")} kg · Est. Value: ₹{tripTotalAmount.toLocaleString("en-IN")}
-                </span>
-              </div>
+            {/* CONDITIONAL LAYOUT: INWARD RETURN vs INWARD PROCUREMENT */}
+            {tripDirection === "Inward Return" ? (
+              <div className="space-y-4">
+                {/* 1. Supplier & Container Return Information */}
+                <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <RotateCcw className="size-4 text-amber-600" />
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-foreground">
+                        Supplier & Container Return Details ({returnItems.length})
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={handleAddReturnDetail}
+                        className="inline-flex items-center gap-1 rounded-md border border-dashed border-primary/50 bg-primary/5 px-2.5 py-1 text-xs font-semibold text-primary hover:bg-primary/10 transition-colors shadow-2xs"
+                      >
+                        <Plus className="size-3.5" /> Add Details
+                      </button>
+                    </div>
+                    <span className="text-xs font-bold text-amber-700 dark:text-amber-400">
+                      Total Return Containers: {totalReturnContainers.toLocaleString("en-IN")} {totalReturnContainers === 1 ? "unit" : "units"}
+                    </span>
+                  </div>
 
-              <div className="overflow-x-auto rounded-xl border">
-                <table className="w-full text-xs">
-                  <thead className="bg-muted/60 text-muted-foreground font-semibold">
-                    <tr>
-                      <th className="px-3 py-2 text-left">Product</th>
-                      <th className="px-3 py-2 text-right">Base Demand</th>
-                      <th className="px-3 py-2 text-right text-amber-700 dark:text-amber-400">Extra Buffer</th>
-                      <th className="px-3 py-2 text-right">Procure KG</th>
-                      <th className="px-3 py-2 text-right">Rate / KG (₹)</th>
-                      <th className="px-3 py-2 text-right">Amount (₹)</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y">
-                    {tripItems.map((item, idx) => (
-                      <tr key={item.product} className="hover:bg-muted/15">
-                        <td className="px-3 py-2.5 font-semibold text-foreground">
-                          {item.product}
-                        </td>
-                        <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">
-                          {item.baseDemand} kg
-                        </td>
-                        <td className="px-3 py-2.5 text-right tabular-nums text-amber-700 dark:text-amber-400 font-medium">
-                          {item.extraKg > 0 ? `+${item.extraKg} kg` : "—"}
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          <input
-                            type="number"
-                            min="1"
-                            step="any"
-                            value={item.qty}
-                            onChange={(e) => handleUpdateTripItemQty(idx, Number(e.target.value))}
-                            className="w-20 rounded border border-primary/40 bg-background px-2 py-1 text-right text-xs font-bold tabular-nums outline-none focus:ring-1 focus:ring-primary"
-                          />
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          <input
-                            type="number"
-                            min="0"
-                            step="any"
-                            value={item.rate}
-                            onChange={(e) => handleUpdateTripItemRate(idx, Number(e.target.value))}
-                            className="w-16 rounded border border-muted-foreground/30 bg-background px-2 py-1 text-right text-xs font-semibold tabular-nums outline-none focus:ring-1 focus:ring-primary"
-                          />
-                        </td>
-                        <td className="px-3 py-2.5 text-right tabular-nums font-bold text-foreground">
-                          ₹{round(item.qty * (item.rate || 0)).toLocaleString("en-IN")}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  <tfoot className="bg-muted/40 font-semibold border-t">
-                    <tr>
-                      <td colSpan={3} className="px-3 py-2 text-foreground font-bold">
-                        Total Market Trip Sourcing
-                      </td>
-                      <td className="px-3 py-2 text-right font-bold text-primary">
-                        {tripTotalNet.toLocaleString("en-IN")} kg
-                      </td>
-                      <td className="px-3 py-2 text-right text-muted-foreground">
-                        Avg ₹{tripAvgRate}/kg
-                      </td>
-                      <td className="px-3 py-2 text-right font-bold text-foreground">
-                        ₹{tripTotalAmount.toLocaleString("en-IN")}
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            </div>
+                  <div className="overflow-x-auto rounded-xl border bg-background">
+                    <table className="w-full text-xs">
+                      <thead className="bg-muted/60 text-muted-foreground font-semibold">
+                        <tr>
+                          <th className="px-3 py-2 text-left min-w-[200px]">Supplier *</th>
+                          <th className="px-3 py-2 text-left min-w-[180px]">Container Type *</th>
+                          <th className="px-3 py-2 text-right min-w-[140px]">Container Return Count *</th>
+                          <th className="px-2 py-2 text-center w-10"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {returnItems.map((detail, idx) => (
+                          <tr key={idx} className="hover:bg-muted/15">
+                            <td className="px-3 py-2.5">
+                              <select
+                                value={detail.supplier}
+                                onChange={(e) => handleUpdateReturnDetail(idx, "supplier", e.target.value)}
+                                className="w-full rounded-md border border-muted-foreground/30 bg-background px-2.5 py-1.5 text-xs font-medium outline-none focus:ring-1 focus:ring-primary truncate"
+                              >
+                                {suppliersList.map((sup) => (
+                                  <option key={sup} value={sup}>
+                                    {sup}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <select
+                                value={detail.containerType}
+                                onChange={(e) => handleUpdateReturnDetail(idx, "containerType", e.target.value)}
+                                className="w-full rounded-md border border-muted-foreground/30 bg-background px-2.5 py-1.5 text-xs font-medium outline-none focus:ring-1 focus:ring-primary truncate"
+                              >
+                                <option value="Plastic crates">Plastic crates (~20-25 kg)</option>
+                                <option value="Gunny bags">Gunny bags (~50 kg)</option>
+                                <option value="Wooden boxes">Wooden boxes (~20 kg)</option>
+                                <option value="Carton boxes">Carton boxes (~15 kg)</option>
+                              </select>
+                            </td>
+                            <td className="px-3 py-2.5 text-right">
+                              <input
+                                type="number"
+                                min="1"
+                                step="1"
+                                value={detail.returnCount || ""}
+                                onChange={(e) =>
+                                  handleUpdateReturnDetail(idx, "returnCount", Math.max(1, parseInt(e.target.value, 10) || 0))
+                                }
+                                placeholder="e.g. 20"
+                                className="w-28 rounded-md border border-muted-foreground/30 bg-background px-2.5 py-1.5 text-right text-xs font-bold tabular-nums outline-none focus:ring-1 focus:ring-primary ml-auto"
+                              />
+                            </td>
+                            <td className="px-2 py-2.5 text-center">
+                              <button
+                                type="button"
+                                title="Remove container return line"
+                                disabled={returnItems.length <= 1}
+                                onClick={() => handleRemoveReturnDetail(idx)}
+                                className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 disabled:opacity-20 disabled:pointer-events-none transition-colors"
+                              >
+                                <Trash2 className="size-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      {returnItems.length > 1 && (
+                        <tfoot className="bg-muted/40 font-semibold border-t">
+                          <tr>
+                            <td className="px-3 py-2 text-foreground font-bold">Total Return Sourcing</td>
+                            <td className="px-3 py-2 text-muted-foreground font-medium">
+                              {[...new Set(returnItems.map((r) => r.supplier))].length} suppliers · {returnItems.length} lines
+                            </td>
+                            <td className="px-3 py-2 text-right font-bold text-amber-700 dark:text-amber-400 tabular-nums">
+                              {totalReturnContainers.toLocaleString("en-IN")} units
+                            </td>
+                            <td></td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
+                  </div>
+                </div>
 
-            {/* Step 2: Supplier & Sourcing Details */}
-            <div className="grid gap-3 sm:grid-cols-2 rounded-xl bg-muted/30 p-3.5 border text-xs">
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">
-                  Market Supplier / Trader <span className="text-destructive">*</span>
-                </label>
-                <select
-                  value={tripSupplier}
-                  onChange={(e) => setTripSupplier(e.target.value)}
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:border-primary"
-                >
-                  {suppliersList.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-[10px] text-muted-foreground mt-1">Koyambedu Wholesale Vegetable Market</p>
-              </div>
+                {/* 2. Transporter, Vehicle & Driver Information */}
+                <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                  <div className="flex items-center gap-2 border-b pb-2">
+                    <Truck className="size-4 text-primary" />
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-foreground">
+                      Transporter & Vehicle Details
+                    </h3>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-4 text-xs">
+                    <div>
+                      <label className="font-semibold text-foreground block mb-1">
+                        Transporter <span className="text-destructive">*</span>
+                      </label>
+                      <select
+                        value={tripTransporter}
+                        onChange={(e) => handleTransporterChange(e.target.value)}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-primary"
+                      >
+                        {transportersList.map((t) => (
+                          <option key={t.name} value={t.name}>
+                            {t.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
 
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">
-                  Delivery Challan (DC) Reference
-                </label>
-                <input
-                  type="text"
-                  value={tripDc}
-                  onChange={(e) => setTripDc(e.target.value)}
-                  placeholder="DC-MKT-4445"
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-mono font-semibold outline-none focus:border-primary"
-                />
-                <p className="text-[10px] text-muted-foreground mt-1">Official physical vendor gate pass</p>
-              </div>
-            </div>
+                    <div>
+                      <label className="font-semibold text-foreground block mb-1">
+                        Vehicle <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={tripVehicle}
+                        onChange={(e) => setTripVehicle(e.target.value)}
+                        placeholder="TN 09 AB 1234"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-mono font-semibold outline-none focus:ring-1 focus:ring-primary"
+                      />
+                    </div>
 
-            {/* Step 3: Logistics & Transport Details */}
-            <div className="grid gap-3 sm:grid-cols-4 rounded-xl bg-muted/30 p-3.5 border text-xs">
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">
-                  Transporter <span className="text-destructive">*</span>
-                </label>
-                <select
-                  value={tripTransporter}
-                  onChange={(e) => handleTransporterChange(e.target.value)}
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:border-primary"
-                >
-                  {transportersList.map((t) => (
-                    <option key={t.name} value={t.name}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                    <div>
+                      <label className="font-semibold text-foreground block mb-1">
+                        Driver <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={tripDriver}
+                        onChange={(e) => setTripDriver(e.target.value)}
+                        placeholder="Raja"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-semibold outline-none focus:ring-1 focus:ring-primary"
+                      />
+                    </div>
 
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">
-                  Vehicle Number <span className="text-destructive">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={tripVehicle}
-                  onChange={(e) => setTripVehicle(e.target.value)}
-                  placeholder="TN 09 AB 1234"
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-mono font-semibold outline-none focus:border-primary"
-                />
-              </div>
+                    <div>
+                      <label className="font-semibold text-foreground block mb-1">
+                        Driver Phone
+                      </label>
+                      <input
+                        type="text"
+                        value={tripDriverPhone}
+                        onChange={(e) => setTripDriverPhone(e.target.value)}
+                        placeholder="9840012345"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-semibold outline-none focus:ring-1 focus:ring-primary"
+                      />
+                    </div>
+                  </div>
 
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">
-                  Driver Name <span className="text-destructive">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={tripDriver}
-                  onChange={(e) => setTripDriver(e.target.value)}
-                  placeholder="Raja"
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-semibold outline-none focus:border-primary"
-                />
-              </div>
+                  {/* From & To Route Locations */}
+                  <div className="grid gap-3 sm:grid-cols-2 text-xs pt-2 border-t">
+                    <div>
+                      <label className="font-semibold text-foreground flex items-center gap-1.5 mb-1">
+                        <span className="size-2 rounded-full bg-emerald-500" />
+                        From Location <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={tripFromLocation}
+                        onChange={(e) => setTripFromLocation(e.target.value)}
+                        placeholder="e.g. Velaan Bay Warehouse (Receiving Bay)"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-medium outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-0.5 block">
+                        Dispatch pickup / departure origin
+                      </span>
+                    </div>
 
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">
-                  Driver Phone
-                </label>
-                <input
-                  type="text"
-                  value={tripDriverPhone}
-                  onChange={(e) => setTripDriverPhone(e.target.value)}
-                  placeholder="9840012345"
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-semibold outline-none focus:border-primary"
-                />
-              </div>
-            </div>
+                    <div>
+                      <label className="font-semibold text-foreground flex items-center gap-1.5 mb-1">
+                        <span className="size-2 rounded-full bg-blue-500" />
+                        To Location <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={tripToLocation}
+                        onChange={(e) => setTripToLocation(e.target.value)}
+                        placeholder="e.g. Koyambedu Wholesale Mandi (Supplier Stall)"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-medium outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-0.5 block">
+                        Destination dropoff location
+                      </span>
+                    </div>
+                  </div>
 
-            {/* Step 4: Container, Freight Charges & Status */}
-            <div className="grid gap-3 sm:grid-cols-4 rounded-xl bg-muted/30 p-3.5 border text-xs">
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">Container Packaging</label>
-                <select
-                  value={tripContainerType}
-                  onChange={(e) => setTripContainerType(e.target.value)}
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:border-primary"
-                >
-                  <option value="Plastic crates">Plastic crates (~20-25 kg)</option>
-                  <option value="Wooden boxes">Wooden boxes (~30 kg)</option>
-                  <option value="Gunny bags">Gunny bags (~50 kg)</option>
-                  <option value="Carton boxes">Carton boxes (~15 kg)</option>
-                </select>
-              </div>
+                  {/* Fleet & Bay Manager In-Charge */}
+                  <div className="grid gap-3 sm:grid-cols-2 text-xs pt-2 border-t">
+                    <div>
+                      <label className="font-semibold text-foreground flex items-center gap-1.5 mb-1">
+                        <UserCheck className="size-3.5 text-primary" />
+                        Fleet / Bay Manager Name
+                      </label>
+                      <input
+                        type="text"
+                        value={tripManagerName}
+                        onChange={(e) => setTripManagerName(e.target.value)}
+                        placeholder="e.g. Karthik (Fleet & Bay Manager)"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-medium outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-0.5 block">
+                        Reverse dispatch supervisor in-charge
+                      </span>
+                    </div>
 
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">Number of Containers</label>
-                <input
-                  type="number"
-                  min="1"
-                  value={tripContainerCount}
-                  onChange={(e) => setTripContainerCount(Number(e.target.value))}
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-bold tabular-nums outline-none focus:border-primary"
-                />
-              </div>
+                    <div>
+                      <label className="font-semibold text-foreground flex items-center gap-1.5 mb-1">
+                        <Phone className="size-3.5 text-primary" />
+                        Manager Contact / Phone
+                      </label>
+                      <input
+                        type="text"
+                        value={tripManagerPhone}
+                        onChange={(e) => setTripManagerPhone(e.target.value)}
+                        placeholder="9840234567"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-medium outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-0.5 block">
+                        Direct contact phone for reverse transport
+                      </span>
+                    </div>
+                  </div>
+                </div>
 
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">Freight Charges (₹)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="50"
-                  value={tripCharges}
-                  onChange={(e) => setTripCharges(Number(e.target.value))}
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-bold tabular-nums outline-none focus:border-primary"
-                />
-              </div>
+                {/* 3. Trip Status, Date & Time Information */}
+                <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                  <div className="flex items-center gap-2 border-b pb-2">
+                    <Clock className="size-4 text-primary" />
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-foreground">
+                      Trip Status & Schedule
+                    </h3>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-3 text-xs">
+                    <div>
+                      <label className="font-semibold text-foreground block mb-1">
+                        Trip Status <span className="text-destructive">*</span>
+                      </label>
+                      <select
+                        value={tripStatus}
+                        onChange={(e) => setTripStatus(e.target.value as any)}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-semibold outline-none focus:ring-1 focus:ring-primary"
+                      >
+                        <option value="Scheduled">Scheduled</option>
+                        <option value="In transit">In transit</option>
+                        <option value="Delivered">Delivered</option>
+                      </select>
+                      <span className="text-[11px] text-muted-foreground mt-1 block">
+                        Current reverse movement state
+                      </span>
+                    </div>
 
-              <div>
-                <label className="font-semibold text-muted-foreground block mb-1">Trip Status</label>
-                <select
-                  value={tripStatus}
-                  onChange={(e) => setTripStatus(e.target.value as any)}
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-bold outline-none focus:border-primary"
-                >
-                  <option value="Submitted">Submitted (Procured & verified)</option>
-                  <option value="Loading">Loading (At market bay)</option>
-                  <option value="Draft">Draft (Planning)</option>
-                </select>
+                    <div>
+                      <label className="font-semibold text-foreground block mb-1">
+                        Date <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="date"
+                        value={tripDate}
+                        onChange={(e) => setTripDate(e.target.value)}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-1 block">
+                        Dispatch departure date
+                      </span>
+                    </div>
+
+                    <div>
+                      <label className="font-semibold text-foreground block mb-1">
+                        Time <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="time"
+                        value={tripTime}
+                        onChange={(e) => setTripTime(e.target.value)}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-1 block">
+                        Dispatch departure time
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
-            </div>
+            ) : (
+              <>
+                {/* Step 1: Products and Purchase Quantities */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                        Products to Procure ({tripItems.length})
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={handleAddTripItem}
+                        className="inline-flex items-center gap-1 rounded-md border border-dashed border-primary/50 bg-primary/5 px-2 py-0.5 text-[11px] font-semibold text-primary hover:bg-primary/10 transition-colors"
+                      >
+                        <Plus className="size-3" /> Add Item
+                      </button>
+                    </div>
+                    <span className="text-xs font-semibold text-primary">
+                      Total Demand: {tripTotalDemand.toLocaleString("en-IN")} kg · Net Procure: {tripTotalNet.toLocaleString("en-IN")} kg ({tripTotalBoxes} {tripTotalBoxes === 1 ? "box" : "boxes"}) · Est. Value: ₹{tripTotalAmount.toLocaleString("en-IN")}
+                    </span>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-xl border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-muted/60 text-muted-foreground font-semibold">
+                        <tr>
+                          <th className="px-3 py-2 text-left min-w-[180px]">Product</th>
+                          <th className="px-2 py-2 text-left min-w-[160px]">Supplier</th>
+                          <th className="px-3 py-2 text-right">Total Demand</th>
+                          <th className="px-2 py-2 text-left">Container</th>
+                          <th className="px-2 py-2 text-right">Box Count</th>
+                          <th className="px-3 py-2 text-right">Procure KG</th>
+                          <th className="px-3 py-2 text-right">Rate / KG (₹)</th>
+                          <th className="px-3 py-2 text-right">Amount (₹)</th>
+                          <th className="px-2 py-2 text-center w-8"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {tripItems.map((item, idx) => (
+                          <tr key={`${item.product}-${idx}`} className="hover:bg-muted/15">
+                            <td className="px-3 py-2.5 font-semibold text-foreground">
+                              <select
+                                value={item.product}
+                                onChange={(e) => handleUpdateTripItemProduct(idx, e.target.value)}
+                                className="w-full min-w-[170px] rounded-md border border-muted-foreground/30 bg-background px-2 py-1 text-xs font-semibold outline-none focus:ring-1 focus:ring-primary truncate"
+                              >
+                                {ITEMS.map((prod) => (
+                                  <option key={prod} value={prod}>
+                                    {prod}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="px-2 py-2.5 text-left">
+                              <select
+                                value={item.supplier}
+                                onChange={(e) => handleUpdateTripItemSupplier(idx, e.target.value)}
+                                className="w-full min-w-[150px] rounded-md border border-muted-foreground/30 bg-background px-2 py-1 text-xs font-medium outline-none focus:ring-1 focus:ring-primary truncate"
+                              >
+                                {suppliersList.map((sup) => (
+                                  <option key={sup} value={sup}>
+                                    {sup}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground font-semibold">
+                              {item.totalDemand.toLocaleString("en-IN")} kg
+                            </td>
+                            <td className="px-2 py-2.5 text-left">
+                              <select
+                                value={item.containerType}
+                                onChange={(e) => handleUpdateTripItemContainer(idx, e.target.value)}
+                                className="w-28 rounded-md border border-muted-foreground/30 bg-background px-2 py-1 text-xs font-medium outline-none focus:ring-1 focus:ring-primary"
+                              >
+                                <option value="Plastic crates">Plastic crates</option>
+                                <option value="Gunny bags">Gunny bags</option>
+                                <option value="Wooden boxes">Wooden boxes</option>
+                                <option value="Carton boxes">Carton boxes</option>
+                              </select>
+                            </td>
+                            <td className="px-2 py-2.5 text-right">
+                              <input
+                                type="number"
+                                min="1"
+                                step="1"
+                                value={item.boxCount}
+                                onChange={(e) => handleUpdateTripItemBoxCount(idx, Number(e.target.value))}
+                                className="w-16 rounded-md border border-muted-foreground/30 bg-background px-2 py-1 text-right text-xs font-bold tabular-nums outline-none focus:ring-1 focus:ring-primary"
+                              />
+                            </td>
+                            <td className="px-3 py-2.5 text-right">
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={item.qty}
+                                onChange={(e) => handleUpdateTripItemQty(idx, Number(e.target.value))}
+                                className="w-20 rounded-md border border-primary/40 bg-background px-2 py-1 text-right text-xs font-bold tabular-nums outline-none focus:ring-1 focus:ring-primary"
+                              />
+                            </td>
+                            <td className="px-3 py-2.5 text-right">
+                              <input
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={item.rate}
+                                onChange={(e) => handleUpdateTripItemRate(idx, Number(e.target.value))}
+                                className="w-16 rounded-md border border-muted-foreground/30 bg-background px-2 py-1 text-right text-xs font-semibold tabular-nums outline-none focus:ring-1 focus:ring-primary"
+                              />
+                            </td>
+                            <td className="px-3 py-2.5 text-right tabular-nums font-bold text-foreground">
+                              ₹{round(item.qty * (item.rate || 0)).toLocaleString("en-IN")}
+                            </td>
+                            <td className="px-2 py-2.5 text-center">
+                              <button
+                                type="button"
+                                title="Remove item"
+                                disabled={tripItems.length <= 1}
+                                onClick={() => handleRemoveTripItem(idx)}
+                                className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 disabled:opacity-20 disabled:pointer-events-none transition-colors"
+                              >
+                                <Trash2 className="size-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="bg-muted/40 font-semibold border-t">
+                        <tr>
+                          <td className="px-3 py-2 text-foreground font-bold">
+                            Total Market Trip Sourcing
+                          </td>
+                          <td className="px-2 py-2 text-left text-muted-foreground font-medium truncate">
+                            {[...new Set(tripItems.map((i) => i.supplier).filter(Boolean))].length} suppliers
+                          </td>
+                          <td className="px-3 py-2 text-right font-bold text-muted-foreground tabular-nums">
+                            {tripTotalDemand.toLocaleString("en-IN")} kg
+                          </td>
+                          <td className="px-2 py-2 text-left text-muted-foreground font-medium">
+                            {tripItems.length} {tripItems.length === 1 ? "item" : "items"}
+                          </td>
+                          <td className="px-2 py-2 text-right font-bold text-foreground tabular-nums">
+                            {tripTotalBoxes} {tripTotalBoxes === 1 ? "box" : "boxes"}
+                          </td>
+                          <td className="px-3 py-2 text-right font-bold text-primary tabular-nums">
+                            {tripTotalNet.toLocaleString("en-IN")} kg
+                          </td>
+                          <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">
+                            Avg ₹{tripAvgRate}/kg
+                          </td>
+                          <td className="px-3 py-2 text-right font-bold text-foreground tabular-nums">
+                            ₹{tripTotalAmount.toLocaleString("en-IN")}
+                          </td>
+                          <td></td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Logistics & Vehicle Details */}
+                <div className="rounded-xl bg-muted/30 p-3.5 border text-xs space-y-3">
+                  <div className="grid gap-3 sm:grid-cols-4">
+                    <div>
+                      <label className="font-semibold text-muted-foreground block mb-1">
+                        Transporter <span className="text-destructive">*</span>
+                      </label>
+                      <select
+                        value={tripTransporter}
+                        onChange={(e) => handleTransporterChange(e.target.value)}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:border-primary"
+                      >
+                        {transportersList.map((t) => (
+                          <option key={t.name} value={t.name}>
+                            {t.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="font-semibold text-muted-foreground block mb-1">
+                        Vehicle Number <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={tripVehicle}
+                        onChange={(e) => setTripVehicle(e.target.value)}
+                        placeholder="TN 09 AB 1234"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-mono font-semibold outline-none focus:border-primary"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="font-semibold text-muted-foreground block mb-1">
+                        Driver Name <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={tripDriver}
+                        onChange={(e) => setTripDriver(e.target.value)}
+                        placeholder="Raja"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-semibold outline-none focus:border-primary"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="font-semibold text-muted-foreground block mb-1">
+                        Driver Phone
+                      </label>
+                      <input
+                        type="text"
+                        value={tripDriverPhone}
+                        onChange={(e) => setTripDriverPhone(e.target.value)}
+                        placeholder="9840012345"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-semibold outline-none focus:border-primary"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2 pt-2 border-t">
+                    <div>
+                      <label className="font-semibold text-muted-foreground flex items-center gap-1.5 mb-1">
+                        <span className="size-2 rounded-full bg-emerald-500" />
+                        From Location <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={tripFromLocation}
+                        onChange={(e) => setTripFromLocation(e.target.value)}
+                        placeholder="e.g. Koyambedu Wholesale Mandi (Supplier Stall)"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-medium outline-none focus:border-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-0.5 block">
+                        Pickup / departure origin
+                      </span>
+                    </div>
+
+                    <div>
+                      <label className="font-semibold text-muted-foreground flex items-center gap-1.5 mb-1">
+                        <span className="size-2 rounded-full bg-blue-500" />
+                        To Location <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={tripToLocation}
+                        onChange={(e) => setTripToLocation(e.target.value)}
+                        placeholder="e.g. Velaan Bay Warehouse (Receiving Bay)"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-medium outline-none focus:border-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-0.5 block">
+                        Destination receiving bay
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Fleet / Purchase Manager In-Charge */}
+                  <div className="grid gap-3 sm:grid-cols-2 pt-2 border-t">
+                    <div>
+                      <label className="font-semibold text-muted-foreground flex items-center gap-1.5 mb-1">
+                        <UserCheck className="size-3.5 text-primary" />
+                        Field / Purchase Manager Name
+                      </label>
+                      <input
+                        type="text"
+                        value={tripManagerName}
+                        onChange={(e) => setTripManagerName(e.target.value)}
+                        placeholder="e.g. Suresh Kumar (Purchase Manager)"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-medium outline-none focus:border-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-0.5 block">
+                        Procurement & fleet supervisor in-charge
+                      </span>
+                    </div>
+
+                    <div>
+                      <label className="font-semibold text-muted-foreground flex items-center gap-1.5 mb-1">
+                        <Phone className="size-3.5 text-primary" />
+                        Manager Contact / Phone
+                      </label>
+                      <input
+                        type="text"
+                        value={tripManagerPhone}
+                        onChange={(e) => setTripManagerPhone(e.target.value)}
+                        placeholder="9840234567"
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-medium outline-none focus:border-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-0.5 block">
+                        Mobile number for mandi dispatch & escalations
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Trip Status, Date & Time Information for Inward */}
+                <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                  <div className="flex items-center gap-2 border-b pb-2">
+                    <Clock className="size-4 text-primary" />
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-foreground">
+                      Trip Status & Schedule
+                    </h3>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-3 text-xs">
+                    <div>
+                      <label className="font-semibold text-foreground block mb-1">
+                        Trip Status <span className="text-destructive">*</span>
+                      </label>
+                      <select
+                        value={tripStatus}
+                        onChange={(e) => setTripStatus(e.target.value as any)}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-semibold outline-none focus:ring-1 focus:ring-primary"
+                      >
+                        <option value="Scheduled">Scheduled</option>
+                        <option value="Loading">Loading</option>
+                        <option value="In transit">In transit</option>
+                        <option value="Submitted">Submitted</option>
+                      </select>
+                      <span className="text-[11px] text-muted-foreground mt-1 block">
+                        Current market trip & procurement state
+                      </span>
+                    </div>
+
+                    <div>
+                      <label className="font-semibold text-foreground block mb-1">
+                        Date <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="date"
+                        value={tripDate}
+                        onChange={(e) => setTripDate(e.target.value)}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-1 block">
+                        Dispatch departure date
+                      </span>
+                    </div>
+
+                    <div>
+                      <label className="font-semibold text-foreground block mb-1">
+                        Time <span className="text-destructive">*</span>
+                      </label>
+                      <input
+                        type="time"
+                        value={tripTime}
+                        onChange={(e) => setTripTime(e.target.value)}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <span className="text-[11px] text-muted-foreground mt-1 block">
+                        Dispatch departure time
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
 
             {/* Modal Bottom Actions */}
             <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
@@ -1691,7 +2586,10 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   onClick={() => handleConfirmCreateTrip(false)}
                   className="h-9 inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 text-xs font-semibold text-primary-foreground shadow-xs hover:opacity-95"
                 >
-                  <Check className="size-3.5" /> Confirm & Create Trip ({tripTotalNet} kg)
+                  <Check className="size-3.5" />
+                  {tripDirection === "Inward Return"
+                    ? `Confirm Inward Return (${totalReturnContainers} ${totalReturnContainers === 1 ? (returnItems[0]?.containerType || "container") : "containers"})`
+                    : `Confirm & Create Trip (${tripTotalNet} kg)`}
                 </Button>
               </div>
             </div>
