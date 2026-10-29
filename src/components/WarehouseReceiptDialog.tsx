@@ -682,7 +682,7 @@ export function WarehouseReceiptDialog({
                     <th className="py-2 px-3 text-right">Sent KG (Supplier)</th>
                     <th className="py-2 px-3 text-right w-32">Received KG (Bay Net)</th>
                     <th className="py-2 px-3 text-center w-56">Containers (Type & Box Count)</th>
-                    <th className="py-2 px-3 text-right">Wastage / Diff</th>
+                    <th className="py-2 px-3 text-right">Difference</th>
                     <th className="py-2 px-3 w-10 text-center"></th>
                   </tr>
                 </thead>

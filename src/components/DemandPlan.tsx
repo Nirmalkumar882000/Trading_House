@@ -117,7 +117,7 @@ interface TripModalItem {
 interface InwardReturnItem {
   supplier: string;
   containerType: string;
-  returnCount: number;
+  returnCount: number | "";
 }
 
 // Step size (kg) for the quick +/- buffer stepper on the consolidation table.
@@ -172,7 +172,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     {
       supplier: "Murugan Traders",
       containerType: "Plastic crates",
-      returnCount: 10,
+      returnCount: "",
     },
   ]);
 
@@ -530,13 +530,13 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     setTripDriverPhone(defaultTransporter?.phone || "9840012345");
     setTripCharges(direction === "Inward Return" ? 350 : 600);
     setTripContainerType("Plastic crates");
-    const initialCrates = direction === "Inward Return" ? 10 : suggestedCrates;
+    const initialCrates = direction === "Inward Return" ? 0 : suggestedCrates;
     setTripContainerCount(initialCrates);
     setReturnItems([
       {
         supplier: suppliersList[0] || "Murugan Traders",
         containerType: "Plastic crates",
-        returnCount: initialCrates,
+        returnCount: "",
       },
     ]);
     setTripDc(direction === "Inward Return" ? `DC-RET-${nextDcNum}` : `DC-MKT-${nextDcNum}`);
@@ -775,7 +775,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       {
         supplier: prev[prev.length - 1]?.supplier || suppliersList[0] || "Murugan Traders",
         containerType: prev[prev.length - 1]?.containerType || "Plastic crates",
-        returnCount: 10,
+        returnCount: "",
       },
     ]);
   };
@@ -1072,7 +1072,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     const dateTitle = selectedDate !== "all" ? ` (Delivery: ${selectedDate})` : "";
 
     const message =
-      `*Velaan Bay — Consolidated Buyer Demand & Procurement Sheet${dateTitle}*\n` +
+      `*Velaan Bay — Consolidated Buyer Demand & Field Manager Sheet${dateTitle}*\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `*Target Delivery:* ${selectedDate !== "all" ? selectedDate : "All Available Dates"}\n` +
       `*Date Generated:* ${new Date().toISOString().slice(0, 10)}\n` +
@@ -1084,7 +1084,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       `*Pending Market Buy:* ${sumBalance.toLocaleString("en-IN")} kg (${sumBalancePackets.toLocaleString("en-IN")} pkts)\n\n` +
       `*Product-wise Requirements:*\n${itemsText}\n\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
-      `_Purchase Managers & Drivers: Please purchase the pending quantities at Udumalaipet Wholesale Mandi._`;
+      `_Field Managers & Drivers: Please purchase the pending quantities at Udumalaipet Wholesale Mandi._`;
 
     window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, "_blank", "noopener,noreferrer");
   };
@@ -1375,7 +1375,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             onClick={() => handleWhatsAppProcurementSheet(false)}
             className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700"
           >
-            <Share2 className="size-3.5" /> WhatsApp Mandi Sheet
+            <Share2 className="size-3.5" /> WhatsApp Field Manager Sheet
           </Button>
         </div>
       </div>
@@ -1715,7 +1715,6 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   ➕ Extra Buffer
                 </th>
                 <th className="px-4 py-3 text-right font-semibold">Total Demand</th>
-                <th className="px-4 py-3 text-center font-semibold text-primary">📦 Packets</th>
                 <th className="px-4 py-3 text-right font-semibold">Actions</th>
               </tr>
             </thead>
@@ -1724,7 +1723,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 dateGroups.map((g) => (
                   <Fragment key={g.date}>
                     <tr className="bg-muted/60 border-y border-border/80">
-                      <td colSpan={9} className="px-4 py-2.5">
+                      <td colSpan={8} className="px-4 py-2.5">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex items-center gap-2">
                             <span className="flex size-6 items-center justify-center rounded-md bg-primary text-primary-foreground font-bold text-xs">
@@ -1932,17 +1931,6 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                             </span>
                             <span className="text-[11px] font-mono font-medium text-primary block">
                               {p.totalPackets.toLocaleString("en-IN")} pkts
-                            </span>
-                          </td>
-
-                          {/* Packets Column */}
-                          <td className="px-4 py-3 text-center whitespace-nowrap">
-                            <span className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 font-mono text-xs font-bold text-primary shadow-2xs">
-                              <Package className="size-3" />
-                              {p.totalPackets.toLocaleString("en-IN")} pkts
-                            </span>
-                            <span className="text-[10px] text-muted-foreground block font-mono mt-0.5">
-                              @{p.defaultPackSize}
                             </span>
                           </td>
 
@@ -2160,17 +2148,6 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                         </span>
                       </td>
 
-                      {/* Packets Column */}
-                      <td className="px-4 py-3 text-center whitespace-nowrap">
-                        <span className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 font-mono text-xs font-bold text-primary shadow-2xs">
-                          <Package className="size-3" />
-                          {p.totalPackets.toLocaleString("en-IN")} pkts
-                        </span>
-                        <span className="text-[10px] text-muted-foreground block font-mono mt-0.5">
-                          @{p.defaultPackSize}
-                        </span>
-                      </td>
-
                       {/* Action Buttons */}
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-1.5">
@@ -2192,7 +2169,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
               {!filteredPlans.length && (
                 <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center text-muted-foreground">
+                  <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground">
                     {search || selectedDate !== "all"
                       ? `No products match the selected date "${selectedDate}" or search "${search}".`
                       : "No buyer demand found. Add buyer purchase orders first."}
@@ -2594,7 +2571,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                         {
                           supplier: suppliersList[0] || "Murugan Traders",
                           containerType: "Plastic crates",
-                          returnCount: 10,
+                          returnCount: "",
                         },
                       ]);
                     }
@@ -2678,11 +2655,12 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                                 type="number"
                                 min="1"
                                 step="1"
-                                value={detail.returnCount || ""}
-                                onChange={(e) =>
-                                  handleUpdateReturnDetail(idx, "returnCount", Math.max(1, parseInt(e.target.value, 10) || 0))
-                                }
-                                placeholder="e.g. 20"
+                                value={detail.returnCount === 0 || detail.returnCount === "" ? "" : detail.returnCount}
+                                onChange={(e) => {
+                                  const raw = e.target.value;
+                                  handleUpdateReturnDetail(idx, "returnCount", raw === "" ? "" : Math.max(1, parseInt(raw, 10) || 0));
+                                }}
+                                placeholder="Enter count"
                                 className="w-28 rounded-md border border-muted-foreground/30 bg-background px-2.5 py-1.5 text-right text-xs font-bold tabular-nums outline-none focus:ring-1 focus:ring-primary ml-auto"
                               />
                             </td>

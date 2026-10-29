@@ -241,6 +241,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
       packSizeLabel: string;
       packSizeKg: number;
       packSizeGrams: number;
+      isPiece: boolean;
       demandKg: number;
       demandPacks: number;
       actualPacks: number;
@@ -259,7 +260,9 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
             defaultPackSize: "1 kg",
             packSizeKg: 1.0,
           };
-        const packSizeKg = spec.packSizeKg > 0 ? spec.packSizeKg : 1.0;
+        const packSizeKg = l.packKg && l.packKg > 0 ? l.packKg : spec.packSizeKg > 0 ? spec.packSizeKg : 1.0;
+        const packSizeLabel = l.packLabel || spec.defaultPackSize || `${packSizeKg} kg`;
+        const isPiece = packSizeLabel.toLowerCase().includes("pc") || packSizeLabel.toLowerCase().includes("piece");
         const packSizeGrams = Math.round(packSizeKg * 1000);
         const demandPacks = Math.ceil(l.q / packSizeKg);
 
@@ -290,9 +293,10 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
           poId: po.id,
           buyer,
           product: l.p,
-          packSizeLabel: spec.defaultPackSize,
+          packSizeLabel,
           packSizeKg,
           packSizeGrams,
+          isPiece,
           demandKg: l.q,
           demandPacks,
           actualPacks,
@@ -1849,7 +1853,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                     </span>
                   </div>
                   <p className="mt-0.5 text-xs text-muted-foreground">
-                    Split <strong>{splitProduct}</strong> into buyer-specified <strong>Packet Counts</strong> & <strong>Grams</strong> (Auto-computes Total KG).
+                    Split <strong>{splitProduct}</strong> into buyer-specified <strong>Packet Counts</strong> & <strong>Pieces / Grams</strong> (Auto-computes Total Pieces & KG).
                   </p>
                 </div>
               </div>
@@ -1862,6 +1866,65 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
             </div>
 
             {(() => {
+              const splitProductSpec = splitProduct
+                ? PRODUCT_CATALOG.find((p) => p.name.toLowerCase() === splitProduct.toLowerCase()) ||
+                  PRODUCT_CATALOG.find((p) => p.name.toLowerCase().includes(splitProduct.toLowerCase()))
+                : null;
+              const isPieceBased =
+                !!splitProductSpec?.defaultPackSize?.toLowerCase().includes("pc") ||
+                !!splitProductSpec?.defaultPackSize?.toLowerCase().includes("piece") ||
+                buyerAllocations.some(
+                  (b) =>
+                    b.product.toLowerCase() === splitProduct?.toLowerCase() && b.isPiece
+                );
+
+              const pcKg = splitProductSpec?.packSizeKg || 1.0;
+              const piecePackOptions: BagSizeOption[] = isPieceBased
+                ? [
+                    {
+                      label: "1 pc",
+                      grams: Math.round(pcKg * 1000),
+                      value: pcKg,
+                      displayKg: `1 pc (1 Piece · ~${pcKg} kg)`,
+                    },
+                    {
+                      label: "2 pcs",
+                      grams: Math.round(pcKg * 2000),
+                      value: round(pcKg * 2),
+                      displayKg: `2 pcs (2 Pieces · ~${round(pcKg * 2)} kg)`,
+                    },
+                    {
+                      label: "3 pcs",
+                      grams: Math.round(pcKg * 3000),
+                      value: round(pcKg * 3),
+                      displayKg: `3 pcs (3 Pieces · ~${round(pcKg * 3)} kg)`,
+                    },
+                    {
+                      label: "5 pcs",
+                      grams: Math.round(pcKg * 5000),
+                      value: round(pcKg * 5),
+                      displayKg: `5 pcs (5 Pieces · ~${round(pcKg * 5)} kg)`,
+                    },
+                    {
+                      label: "10 pcs",
+                      grams: Math.round(pcKg * 10000),
+                      value: round(pcKg * 10),
+                      displayKg: `10 pcs (10 Pieces · ~${round(pcKg * 10)} kg)`,
+                    },
+                  ]
+                : [];
+
+              const formatPackSizeDisplay = (sizeKg: number | string) => {
+                const n = Number(sizeKg);
+                if (isPieceBased) {
+                  const count = Math.round(n / pcKg);
+                  if (Math.abs(n - count * pcKg) < 0.01 && count > 0) {
+                    return `${count} ${count === 1 ? "pc" : "pcs"} (${n} kg)`;
+                  }
+                }
+                return formatGramsLabel(n);
+              };
+
               const productBuyerDemands = buyerAllocations.filter(
                 (b) => b.product.toLowerCase() === splitProduct.toLowerCase() && b.balanceKg > 0.001
               );
@@ -1927,13 +1990,19 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                                   </div>
                                   <span className="font-mono text-[10px] text-primary">{b.poId}</span>
                                 </div>
-                                <div className="text-[11px] text-muted-foreground flex items-center justify-between">
-                                  <span>
-                                    Target: <strong className="text-foreground">{b.packSizeGrams} Grams</strong>
-                                  </span>
-                                  <span className="font-semibold text-amber-700 dark:text-amber-400">
-                                    Needs: <strong>{b.balancePacks} pkts</strong> ({b.balanceKg} kg)
-                                  </span>
+                                <div className="text-[11px] text-muted-foreground space-y-1">
+                                  <div className="flex items-center justify-between">
+                                    <span>
+                                      Target: <strong className="text-foreground">{b.isPiece ? `${b.packSizeLabel} (Pieces)` : `${b.packSizeGrams} Grams`}</strong>
+                                    </span>
+                                    <span className="font-semibold text-amber-700 dark:text-amber-400">
+                                      Pending: <strong>{b.balancePacks} {b.isPiece ? "pcs" : "pkts"}</strong> ({b.balanceKg} kg)
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1 font-mono">
+                                    <span>Demand: <strong className="text-foreground">{b.demandPacks} {b.isPiece ? "pcs" : "pkts"}</strong> ({b.demandKg} kg)</span>
+                                    <span className="text-emerald-700 dark:text-emerald-400 font-semibold">Packed Done: <strong>{b.actualPacks} {b.isPiece ? "pcs" : "pkts"}</strong> ({b.actualKg} kg)</span>
+                                  </div>
                                 </div>
                               </div>
 
@@ -1968,12 +2037,12 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                                     setSplits(newSplits);
                                     setSplitTargetPo(b.poId);
                                     toast.success(
-                                      `Configured line for ${b.buyer}: ${b.packSizeGrams}g × ${pCount} pkts (${weight} kg)`
+                                      `Configured line for ${b.buyer}: ${b.isPiece ? b.packSizeLabel : `${b.packSizeGrams}g`} × ${pCount} pkts (${weight} kg)`
                                     );
                                   }}
                                   className="h-6 text-[11px] gap-1 px-2 font-semibold"
                                 >
-                                  <Zap className="size-2.5" /> Fill {b.balancePacks} pkts @ {b.packSizeGrams}g
+                                  <Zap className="size-2.5" /> Fill {b.balancePacks} {b.isPiece ? "pcs" : "pkts"} @ {b.isPiece ? b.packSizeLabel : `${b.packSizeGrams}g`}
                                 </Button>
                               </div>
                             </div>
@@ -2024,7 +2093,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                         Split Lines ({splits.length}) — Specify Packet Size & Packet Count
                       </p>
                       <span className="text-[11px] text-primary font-medium">
-                        Packet Count (pkts) × Grams (g) = Total KG
+                        Packet Count (pkts) × {isPieceBased ? "Pieces (pcs)" : "Grams (g)"} = Total {isPieceBased ? "Pieces & KG" : "KG"}
                       </span>
                     </div>
 
@@ -2101,7 +2170,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                                   .filter((b) => b.product.toLowerCase() === splitProduct.toLowerCase())
                                   .map((b) => (
                                     <option key={b.poId} value={b.poId}>
-                                      👤 {b.buyer} · {b.poId} ({b.demandPacks} pkts @ {b.packSizeGrams}g)
+                                      👤 {b.buyer} · {b.poId} ({b.demandPacks} {b.isPiece ? "pcs" : "pkts"} @ {b.isPiece ? b.packSizeLabel : `${b.packSizeGrams}g`})
                                     </option>
                                   ))}
                               </select>
@@ -2110,7 +2179,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                             {/* Packet Size / Grams Selector */}
                             <div className="w-44">
                               <label className="text-[10px] font-semibold text-muted-foreground block mb-0.5">
-                                Packet Size (Grams)
+                                {isPieceBased ? "Pack Spec (Pieces)" : "Packet Size (Grams)"}
                               </label>
                               <select
                                 value={String(s.size)}
@@ -2135,11 +2204,22 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                                 }}
                                 className="h-8 w-full rounded-md border bg-background px-2 text-xs font-semibold outline-none focus:ring-1 focus:ring-primary"
                               >
-                                {STANDARD_BAG_SIZES.map((opt) => (
-                                  <option key={opt.label} value={String(opt.value)}>
-                                    {opt.displayKg}
-                                  </option>
-                                ))}
+                                {isPieceBased && piecePackOptions.length > 0 && (
+                                  <optgroup label="Piece-based Pack Sizes">
+                                    {piecePackOptions.map((opt) => (
+                                      <option key={opt.label} value={String(opt.value)}>
+                                        {opt.displayKg}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                                <optgroup label={isPieceBased ? "Weight-based / Grams" : "Standard Sizes"}>
+                                  {STANDARD_BAG_SIZES.map((opt) => (
+                                    <option key={opt.label} value={String(opt.value)}>
+                                      {opt.displayKg}
+                                    </option>
+                                  ))}
+                                </optgroup>
                               </select>
                             </div>
 
@@ -2268,15 +2348,30 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                                   }}
                                   className="rounded bg-amber-500/20 text-amber-800 dark:text-amber-300 px-1.5 py-0.2 text-[10px] font-semibold hover:bg-amber-500/30 transition-colors cursor-pointer ml-1"
                                 >
-                                  Exact Buyer Balance ({selectedBuyerDemand.balancePacks} pkts)
+                                  Exact Buyer Balance ({selectedBuyerDemand.balancePacks} {selectedBuyerDemand.isPiece ? "pcs" : "pkts"})
                                 </button>
                               )}
                             </div>
 
                             <div className="flex items-center gap-1 font-mono text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
-                              <span>⚡ {linePacks} pkts × {formatGramsLabel(s.size)} = {round(s.qty)} kg</span>
+                              <span>⚡ {linePacks} pkts @ {formatPackSizeDisplay(s.size)} = {isPieceBased ? `${linePacks} pcs (${round(s.qty)} kg)` : `${round(s.qty)} kg`}</span>
                             </div>
                           </div>
+
+                          {/* Buyer Demand vs Actual Packed Progress Indicator */}
+                          {selectedBuyerDemand && (
+                            <div className="flex flex-wrap items-center justify-between gap-1.5 rounded-md bg-muted/40 px-2.5 py-1 text-[11px] font-mono border border-border/40">
+                              <span className="text-muted-foreground">
+                                PO Demand: <strong className="text-foreground">{selectedBuyerDemand.demandPacks} {selectedBuyerDemand.isPiece ? "pcs" : "pkts"}</strong> ({selectedBuyerDemand.demandKg} kg)
+                              </span>
+                              <span className="text-emerald-700 dark:text-emerald-400 font-semibold">
+                                Actual Packed Done: <strong>{selectedBuyerDemand.actualPacks} {selectedBuyerDemand.isPiece ? "pcs" : "pkts"}</strong> ({selectedBuyerDemand.actualKg} kg)
+                              </span>
+                              <span className="text-amber-700 dark:text-amber-400 font-semibold">
+                                Remaining: <strong>{selectedBuyerDemand.balancePacks} {selectedBuyerDemand.isPiece ? "pcs" : "pkts"}</strong> ({selectedBuyerDemand.balanceKg} kg)
+                              </span>
+                            </div>
+                          )}
 
                           {/* Buyer Demand Over-allocation Warning */}
                           {isOverBuyerDemand && (
@@ -2314,7 +2409,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                     <div className="text-xs">
                       <span className="text-muted-foreground">Total Output: </span>
                       <strong className="text-foreground">{totalBags} packets</strong>
-                      <span className="text-muted-foreground ml-1">({kg(totalAllocatedKg)})</span>
+                      <span className="text-muted-foreground ml-1">({isPieceBased ? `${totalBags} pcs · ` : ""}{kg(totalAllocatedKg)})</span>
                     </div>
                     <div className="flex gap-2">
                       <Button variant="ghost" size="sm" onClick={() => setSplitProduct(null)}>

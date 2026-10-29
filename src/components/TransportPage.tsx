@@ -719,7 +719,6 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
                 <th className="px-3.5 py-3 font-semibold">{isReturnView ? "Container Type & Count" : "Products Loaded"}</th>
                 {!isReturnView && <th className="px-3.5 py-3 font-semibold">Fleet & Driver</th>}
                 {!isReturnView && <th className="px-3.5 py-3 text-right font-semibold">Loading KG</th>}
-                {!isReturnView && <th className="px-3.5 py-3 text-right font-semibold">Freight (₹)</th>}
                 <th className="px-3.5 py-3 font-semibold">Trip Status</th>
                 <th className="px-3.5 py-3 text-right font-semibold">Actions</th>
               </tr>
@@ -860,13 +859,6 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
                     </td>
                     )}
 
-                    {/* Transport Charges */}
-                    {!isReturnView && (
-                    <td className="px-3.5 py-3 text-right tabular-nums font-mono font-semibold text-foreground whitespace-nowrap">
-                      ₹{Number(r["charges"] || 0).toLocaleString("en-IN")}
-                    </td>
-                    )}
-
                     {/* Trip Status & Step progression */}
                     <td className="px-3.5 py-3 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                       <div className="space-y-1">
@@ -940,7 +932,7 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
 
               {!filteredRows.length && (
                 <tr>
-                  <td colSpan={isReturnView ? 6 : 10} className="px-4 py-14 text-center">
+                  <td colSpan={isReturnView ? 6 : 9} className="px-4 py-14 text-center">
                     <div className="flex flex-col items-center justify-center">
                       <Truck className="size-10 text-muted-foreground/50 mb-2" />
                       <p className="text-base font-semibold text-foreground">No Transport Movements Found</p>

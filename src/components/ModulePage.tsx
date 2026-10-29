@@ -831,7 +831,10 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
           <Button variant="ghost" type="button" onClick={onClose} aria-label="Close"><X className="size-5" /></Button>
         </div>
         <div className="grid gap-4 p-5 sm:grid-cols-2">
-          {mod.fields.filter(f => !(mod.slug === "purchase-orders" && (f.key === "extraKg" || f.key === "qty"))).map((f) => (
+          {mod.fields
+            .filter(f => !(mod.slug === "purchase-orders" && (f.key === "extraKg" || f.key === "qty")))
+            .filter(f => !(mod.slug === "trips" && (f.key === "supplier" || f.key === "rate")))
+            .map((f) => (
             <div key={f.key} className={cn("space-y-1.5", (f.type === "textarea" || f.type === "products" || f.type === "buys") && "sm:col-span-2")}>
               <label htmlFor={`field-${f.key}`} className="text-xs font-semibold text-muted-foreground">
                 {f.label}{f.required && <span className="text-destructive"> *</span>}{f.suffix && ` (${f.suffix})`}{!priceEditable && (f.money || f.key === "rate" || f.key === "price") && " · Back office only"}
@@ -1820,10 +1823,10 @@ function BuysEditor({ products, suppliers, value, onChange, need, priceEditable 
   const emit = (b: typeof buys) => onChange(JSON.stringify(b));
   const patch = (i: number, p: Partial<(typeof buys)[number]>) => emit(buys.map((b, j) => (j === i ? { ...b, ...p } : b)));
   const cell = "w-full rounded-md border bg-background px-2 py-1 text-sm";
-  const planned = (p: string, skip = -1) => buys.reduce((a, b, j) => a + (j !== skip && b.p === p ? b.q : 0), 0);
-  const left = (p: string, skip = -1) => Math.max(0, Math.round(((need[p]?.buy ?? 0) - planned(p, skip)) * 1000) / 1000);
+  const planned = (p: string, skip = -1) => buys.reduce((a, b, j) => a + (j !== skip && b.p === p ? Number(b.q || 0) : 0), 0);
+  const left = (p: string, skip = -1) => Math.max(0, Math.round(((need[p]?.buy ?? 0) - planned(p, skip)) * 100) / 100);
   const needed = Object.entries(need);
-  const kgTotal = buys.reduce((a, b) => a + b.q, 0);
+  const kgTotal = Math.round(buys.reduce((a, b) => a + Number(b.q || 0), 0) * 100) / 100;
   const containerTotal = buys.reduce((a, b) => a + (b.cc || 0), 0);
   const CONTAINER_TYPES = ["Plastic crates", "Wooden boxes", "Gunny bags", "Carton boxes"];
   const amount = buys.reduce((a, b) => a + b.q * b.r, 0);
@@ -1879,7 +1882,7 @@ function BuysEditor({ products, suppliers, value, onChange, need, priceEditable 
                 <th className="px-2 py-2">Supplier</th>
                 <th className="px-2 py-2">Product</th>
                 <th className="px-2 py-2">KG</th>
-                <th className="px-2 py-2">Avg price / KG</th>
+                <th className="px-2 py-2">Price / KG</th>
                 <th className="px-2 py-2">Container</th>
                 <th className="px-2 py-2">Container Qty</th>
                 <th className="px-2 py-2 text-right">Amount</th>
@@ -1926,7 +1929,7 @@ function BuysEditor({ products, suppliers, value, onChange, need, priceEditable 
                   </td>
                   <td className="p-1.5">
                     <input
-                      aria-label="Avg price per KG"
+                      aria-label="Price per KG"
                       type="number"
                       min="0"
                       step="any"
