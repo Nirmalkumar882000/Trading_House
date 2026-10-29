@@ -35,11 +35,36 @@ import {
   Calendar,
 } from "lucide-react";
 import { toast } from "sonner";
-import { ITEMS, PRODUCT_CATALOG, SUPPLIERS, BUYERS, type ModuleDef, type Row } from "@/lib/modules";
+import { ITEMS, PRODUCT_CATALOG, SUPPLIERS, BUYERS, type ModuleDef, type Row, type ProductItem } from "@/lib/modules";
 import { useStore } from "@/lib/store";
 import { parseLines, validateData, round, normalize, parseBuys } from "@/lib/workflow";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
+
+export const getProductPackSpec = (prodName: string, customCatalog?: ProductItem[]): ProductItem => {
+  const cat = customCatalog && customCatalog.length > 0 ? customCatalog : PRODUCT_CATALOG;
+  const pNorm = (prodName || "").toLowerCase().trim();
+  const found =
+    cat.find((x) => x.name.toLowerCase().trim() === pNorm) ||
+    cat.find((x) => x.name.toLowerCase().includes(pNorm) || pNorm.includes(x.name.toLowerCase())) ||
+    PRODUCT_CATALOG.find((x) => x.name.toLowerCase().trim() === pNorm) ||
+    PRODUCT_CATALOG.find((x) => x.name.toLowerCase().includes(pNorm) || pNorm.includes(x.name.toLowerCase()));
+  if (found && found.packSizeKg > 0) {
+    return found;
+  }
+  return {
+    name: prodName,
+    defaultPackSize: "1 kg",
+    packSizeKg: 1.0,
+    category: "Produce",
+  };
+};
+
+export const computePackets = (kg: number, packSizeKg: number): number => {
+  if (!kg || kg <= 0) return 0;
+  const size = packSizeKg > 0 ? packSizeKg : 1.0;
+  return Math.ceil(kg / size);
+};
 
 type BuyerDemandItem = {
   buyer: string;
@@ -50,6 +75,10 @@ type BuyerDemandItem = {
   date?: string;
   deliveryDate?: string;
   targetDate?: string;
+  packKg?: number;
+  packLabel?: string;
+  basePackets?: number;
+  packets?: number;
 };
 
 type ProductPlan = {
@@ -64,6 +93,12 @@ type ProductPlan = {
   deliveryDates: string[];
   orderDates: string[];
   primaryDate: string;
+  defaultPackSize: string;
+  packSizeKg: number;
+  basePackets: number;
+  totalPackets: number;
+  purchasedPackets: number;
+  balancePackets: number;
 };
 
 interface TripModalItem {
@@ -175,30 +210,38 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     ];
   }, [data]);
 
-  // Extract all available delivery & order dates from purchase orders with PO count and total KG
+  // Extract all available delivery & order dates from purchase orders with PO count, total KG, and packet counts
   const availableDates = useMemo(() => {
-    const datesMap = new Map<string, { count: number; totalKg: number }>();
+    const datesMap = new Map<string, { count: number; totalKg: number; totalPackets: number }>();
     for (const po of data["purchase-orders"] ?? []) {
       if (po.status === "Rejected") continue;
       const d = String(po["deliveryDate"] || po["date"] || "Prompt").trim();
       const qty = Number(po["qty"]) || 0;
-      const current = datesMap.get(d) || { count: 0, totalKg: 0 };
+      const lines = parseLines(po["item"]);
+      const pkts = lines.reduce((sum, l) => {
+        const spec = getProductPackSpec(l.p, catalog);
+        const pSize = l.packKg && l.packKg > 0 ? l.packKg : spec.packSizeKg;
+        return sum + Math.ceil((Number(l.q) || 0) / (pSize > 0 ? pSize : 1.0));
+      }, 0);
+      const current = datesMap.get(d) || { count: 0, totalKg: 0, totalPackets: 0 };
       datesMap.set(d, {
         count: current.count + 1,
         totalKg: round2(current.totalKg + qty),
+        totalPackets: current.totalPackets + pkts,
       });
     }
     return Array.from(datesMap.entries())
       .map(([date, info]) => ({ date, ...info }))
       .sort((a, b) => b.date.localeCompare(a.date));
-  }, [data]);
+  }, [data, catalog]);
 
-  // 1) Calculate comprehensive consolidation plan with exact extraKg breakdown and date tracking
+  // 1) Calculate comprehensive consolidation plan with exact extraKg breakdown, pack spec, and packet counts
   const plans = useMemo<ProductPlan[]>(() => {
     const map = new Map<string, ProductPlan>();
     const get = (p: string): ProductPlan => {
       let r = map.get(p);
       if (!r) {
+        const spec = getProductPackSpec(p, catalog);
         r = {
           product: p,
           baseDemand: 0,
@@ -211,6 +254,12 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
           deliveryDates: [],
           orderDates: [],
           primaryDate: "",
+          defaultPackSize: spec.defaultPackSize,
+          packSizeKg: spec.packSizeKg > 0 ? spec.packSizeKg : 1.0,
+          basePackets: 0,
+          totalPackets: 0,
+          purchasedPackets: 0,
+          balancePackets: 0,
         };
         map.set(p, r);
       }
@@ -257,6 +306,9 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
         }
         if (!plan.primaryDate) plan.primaryDate = targetDate;
 
+        const effectivePackKg = l.packKg && l.packKg > 0 ? l.packKg : plan.packSizeKg;
+        const effectivePackLabel = l.packLabel || plan.defaultPackSize;
+
         let b = plan.buyers.find((x) => x.buyer === po["buyer"]);
         if (!b) {
           b = {
@@ -268,12 +320,18 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             date: poOrderDate,
             deliveryDate: poDeliveryDate,
             targetDate,
+            packKg: effectivePackKg,
+            packLabel: effectivePackLabel,
+            basePackets: 0,
+            packets: 0,
           };
           plan.buyers.push(b);
         }
         b.baseQty = round2(b.baseQty + lineBase);
         b.extraKg = round2(b.extraKg + extraShare);
         b.qty = round2(b.qty + lineTotal);
+        b.basePackets = computePackets(b.baseQty, effectivePackKg);
+        b.packets = computePackets(b.qty, effectivePackKg);
         if (!b.pos.includes(po.id)) b.pos.push(po.id);
       }
     }
@@ -300,17 +358,26 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       const plan = map.get(k);
       if (!plan) return [];
       plan.balance = Math.max(0, round2(plan.demand - plan.purchased - plan.reserved));
+      plan.basePackets = computePackets(plan.baseDemand, plan.packSizeKg);
+      plan.totalPackets = computePackets(plan.demand, plan.packSizeKg);
+      plan.purchasedPackets = computePackets(plan.purchased, plan.packSizeKg);
+      plan.balancePackets = computePackets(plan.balance, plan.packSizeKg);
       return [plan];
     });
-  }, [data, selectedDate]);
+  }, [data, selectedDate, catalog]);
 
-  // Aggregated KPI numbers (rounded to 2 decimal places)
+  // Aggregated KPI numbers (rounded to 2 decimal places) with packet count aggregations
   const totalBaseDemand = useMemo(() => round2(plans.reduce((a, p) => a + p.baseDemand, 0)), [plans]);
   const totalExtraKg = useMemo(() => round2(plans.reduce((a, p) => a + p.extraKg, 0)), [plans]);
   const totalDemand = useMemo(() => round2(plans.reduce((a, p) => a + p.demand, 0)), [plans]);
   const totalPurchased = useMemo(() => round2(plans.reduce((a, p) => a + p.purchased, 0)), [plans]);
   const totalReserved = useMemo(() => round2(plans.reduce((a, p) => a + p.reserved, 0)), [plans]);
   const totalBalance = useMemo(() => round2(plans.reduce((a, p) => a + p.balance, 0)), [plans]);
+
+  const totalBasePackets = useMemo(() => plans.reduce((a, p) => a + (p.basePackets || 0), 0), [plans]);
+  const totalDemandPackets = useMemo(() => plans.reduce((a, p) => a + (p.totalPackets || 0), 0), [plans]);
+  const totalPurchasedPackets = useMemo(() => plans.reduce((a, p) => a + (p.purchasedPackets || 0), 0), [plans]);
+  const totalBalancePackets = useMemo(() => plans.reduce((a, p) => a + (p.balancePackets || 0), 0), [plans]);
 
   // Filtered plans based on search & tab
   const filteredPlans = useMemo(() => {
@@ -335,18 +402,20 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     baseDemand: number;
     extraKg: number;
     demand: number;
+    basePackets: number;
+    totalPackets: number;
     plans: ProductPlan[];
   };
 
   const dateGroups = useMemo<DateGroupedPlan[]>(() => {
-    const groupsMap = new Map<string, { date: string; plans: ProductPlan[]; baseDemand: number; extraKg: number; demand: number; pos: Set<string> }>();
+    const groupsMap = new Map<string, { date: string; plans: ProductPlan[]; baseDemand: number; extraKg: number; demand: number; basePackets: number; totalPackets: number; pos: Set<string> }>();
 
     for (const p of filteredPlans) {
       const datesToGroup = p.deliveryDates.length ? p.deliveryDates : [p.primaryDate || "Prompt"];
       for (const d of datesToGroup) {
         let g = groupsMap.get(d);
         if (!g) {
-          g = { date: d, plans: [], baseDemand: 0, extraKg: 0, demand: 0, pos: new Set() };
+          g = { date: d, plans: [], baseDemand: 0, extraKg: 0, demand: 0, basePackets: 0, totalPackets: 0, pos: new Set() };
           groupsMap.set(d, g);
         }
         if (!g.plans.some((x) => x.product === p.product)) {
@@ -354,6 +423,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
           g.baseDemand = round2(g.baseDemand + p.baseDemand);
           g.extraKg = round2(g.extraKg + p.extraKg);
           g.demand = round2(g.demand + p.demand);
+          g.basePackets += p.basePackets;
+          g.totalPackets += p.totalPackets;
           p.buyers.forEach((b) => b.pos.forEach((id) => g.pos.add(id)));
         }
       }
@@ -367,6 +438,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
         baseDemand: g.baseDemand,
         extraKg: g.extraKg,
         demand: g.demand,
+        basePackets: g.basePackets,
+        totalPackets: g.totalPackets,
         plans: g.plans,
       }))
       .sort((a, b) => b.date.localeCompare(a.date));
@@ -980,11 +1053,11 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
     const itemsText = targetPlans
       .map((p) => {
-        const bufferTag = p.extraKg > 0 ? ` [incl. +${formatKg2(p.extraKg)} kg buffer]` : "";
-        const balTag = p.balance > 0 ? `⚠️ *Buy: ${formatKg2(p.balance)} kg*` : (p.reserved > 0 ? "🚚 Planned in Trip" : "✅ Fulfilled");
+        const bufferTag = p.extraKg > 0 ? ` [incl. +${formatKg2(p.extraKg)} kg buffer (+${Math.max(0, p.totalPackets - p.basePackets)} pkts)]` : "";
+        const balTag = p.balance > 0 ? `⚠️ *Buy: ${formatKg2(p.balance)} kg (${p.balancePackets} pkts)*` : (p.reserved > 0 ? "🚚 Planned in Trip" : "✅ Fulfilled");
         const datesTag = p.deliveryDates.length ? ` · Due: ${p.deliveryDates.join(", ")}` : (p.primaryDate ? ` · Due: ${p.primaryDate}` : "");
-        const buyersList = p.buyers.map((b) => `${b.buyer} (${formatKg2(b.qty)}kg)`).join(", ");
-        return `• *${p.product}*${datesTag}: Demand ${formatKg2(p.demand)} kg${bufferTag} | Mkt: ${formatKg2(p.purchased)} kg | ${balTag}\n   _Buyers: ${buyersList}_`;
+        const buyersList = p.buyers.map((b) => `${b.buyer} (${formatKg2(b.qty)}kg · ${b.packets || computePackets(b.qty, p.packSizeKg)} pkts)`).join(", ");
+        return `• *${p.product}* [Pack: ${p.defaultPackSize}]${datesTag}: Demand ${formatKg2(p.demand)} kg (${p.totalPackets} pkts)${bufferTag} | Mkt: ${formatKg2(p.purchased)} kg (${p.purchasedPackets} pkts) | ${balTag}\n   _Buyers: ${buyersList}_`;
       })
       .join("\n");
 
@@ -993,6 +1066,9 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     const sumExtra = round2(targetPlans.reduce((s, p) => s + p.extraKg, 0));
     const sumPurchased = round2(targetPlans.reduce((s, p) => s + p.purchased, 0));
     const sumBalance = round2(targetPlans.reduce((s, p) => s + p.balance, 0));
+    const sumDemandPackets = targetPlans.reduce((s, p) => s + p.totalPackets, 0);
+    const sumBasePackets = targetPlans.reduce((s, p) => s + p.basePackets, 0);
+    const sumBalancePackets = targetPlans.reduce((s, p) => s + p.balancePackets, 0);
     const dateTitle = selectedDate !== "all" ? ` (Delivery: ${selectedDate})` : "";
 
     const message =
@@ -1001,11 +1077,11 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       `*Target Delivery:* ${selectedDate !== "all" ? selectedDate : "All Available Dates"}\n` +
       `*Date Generated:* ${new Date().toISOString().slice(0, 10)}\n` +
       `*Items Count:* ${targetPlans.length} products\n` +
-      `*Total Consolidated Demand:* ${sumDemand.toLocaleString("en-IN")} kg\n` +
-      `*Base Buyer Demand:* ${sumBase.toLocaleString("en-IN")} kg\n` +
-      `*Extra Buyer Buffer Margin:* +${sumExtra.toLocaleString("en-IN")} kg\n` +
+      `*Total Consolidated Demand:* ${sumDemand.toLocaleString("en-IN")} kg (${sumDemandPackets.toLocaleString("en-IN")} pkts)\n` +
+      `*Base Buyer Demand:* ${sumBase.toLocaleString("en-IN")} kg (${sumBasePackets.toLocaleString("en-IN")} pkts)\n` +
+      `*Extra Buyer Buffer Margin:* +${sumExtra.toLocaleString("en-IN")} kg (+${Math.max(0, sumDemandPackets - sumBasePackets)} pkts)\n` +
       `*Purchased in Market:* ${sumPurchased.toLocaleString("en-IN")} kg\n` +
-      `*Pending Market Buy:* ${sumBalance.toLocaleString("en-IN")} kg\n\n` +
+      `*Pending Market Buy:* ${sumBalance.toLocaleString("en-IN")} kg (${sumBalancePackets.toLocaleString("en-IN")} pkts)\n\n` +
       `*Product-wise Requirements:*\n${itemsText}\n\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `_Purchase Managers & Drivers: Please purchase the pending quantities at Udumalaipet Wholesale Mandi._`;
@@ -1013,36 +1089,46 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, "_blank", "noopener,noreferrer");
   };
 
-  // Export CSV with full Base + Extra Buffer breakdown and Target Delivery Date
+  // Export CSV with full Base + Extra Buffer breakdown, Pack Spec, Packets and Target Delivery Date
   const handleExportCsv = () => {
     const headers = [
       "Product",
+      "Pack Spec",
+      "Pack Size (KG)",
       "Target Delivery Date",
       "Buyers",
       "Base Demand (KG)",
+      "Base Packets",
       "Extra Buffer (KG)",
       "Total Demand (KG)",
+      "Total Packets",
       "Purchased (KG)",
       "Planned in Trips (KG)",
       "Balance to Buy (KG)",
+      "Balance Packets",
       "Status",
     ];
     const rows = plans.map((p) => {
       const dates = p.deliveryDates.length ? p.deliveryDates.join("; ") : (p.primaryDate || "Prompt");
       const buyersList = p.buyers
-        .map((b) => `${b.buyer} (${formatKg2(b.baseQty)}kg + ${formatKg2(b.extraKg)}kg buffer · ${b.deliveryDate || b.date || "Prompt"})`)
+        .map((b) => `${b.buyer} (${formatKg2(b.baseQty)}kg · ${b.basePackets || computePackets(b.baseQty, p.packSizeKg)} pkts + ${formatKg2(b.extraKg)}kg buffer · ${b.deliveryDate || b.date || "Prompt"})`)
         .join("; ");
       const status = p.balance <= 0 ? (p.reserved > 0 ? "Planned" : "Fulfilled") : "Pending";
       return [
         `"${p.product}"`,
+        `"${p.defaultPackSize}"`,
+        p.packSizeKg,
         `"${dates}"`,
         `"${buyersList}"`,
         p.baseDemand,
+        p.basePackets,
         p.extraKg,
         p.demand,
+        p.totalPackets,
         p.purchased,
         p.reserved,
         p.balance,
+        p.balancePackets,
         `"${status}"`,
       ].join(",");
     });
@@ -1306,8 +1392,11 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             {formatKg2(totalDemand)}{" "}
             <span className="text-sm font-normal text-muted-foreground">kg</span>
           </p>
+          <div className="mt-0.5 flex items-center gap-1.5 font-mono text-xs font-bold text-primary">
+            <span>📦 {totalDemandPackets.toLocaleString("en-IN")} pkts total</span>
+          </div>
           <p className="mt-1 text-[11px] text-muted-foreground">
-            {formatKg2(totalBaseDemand)} kg base + {formatKg2(totalExtraKg)} kg extra buffer
+            {formatKg2(totalBaseDemand)} kg base ({totalBasePackets.toLocaleString("en-IN")} pkts) + {formatKg2(totalExtraKg)} kg buffer
             {selectedDate !== "all" ? ` · Delivery: ${selectedDate}` : " · All dates"}
           </p>
         </div>
@@ -1326,11 +1415,13 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             +{formatKg2(totalExtraKg)}{" "}
             <span className="text-sm font-normal text-amber-800/80 dark:text-amber-300/80">kg</span>
           </p>
+          <div className="mt-0.5 flex items-center gap-1.5 font-mono text-xs font-bold text-amber-800 dark:text-amber-300">
+            <span>+{Math.max(0, totalDemandPackets - totalBasePackets).toLocaleString("en-IN")} pkts buffer</span>
+          </div>
           <p className="mt-1 text-[11px] text-amber-900/80 dark:text-amber-300/80">
             Aggregated contingency buffer across accepted buyer POs
           </p>
         </div>
-
 
         {/* Purchased in Market */}
         <div className="rounded-xl border bg-card p-4 shadow-card">
@@ -1342,6 +1433,9 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             {formatKg2(totalPurchased)}{" "}
             <span className="text-sm font-normal text-muted-foreground">kg</span>
           </p>
+          <div className="mt-0.5 flex items-center gap-1.5 font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400">
+            <span>🚚 {totalPurchasedPackets.toLocaleString("en-IN")} pkts procured</span>
+          </div>
           <p className="mt-1 text-[11px] text-muted-foreground">
             {totalReserved > 0 ? `${formatKg2(totalReserved)} kg reserved in loading trips` : "Submitted market DC purchases"}
           </p>
@@ -1362,6 +1456,14 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             {formatKg2(totalBalance)}{" "}
             <span className="text-sm font-normal text-muted-foreground">kg</span>
           </p>
+          <div
+            className={cn(
+              "mt-0.5 flex items-center gap-1.5 font-mono text-xs font-bold",
+              totalBalance > 0 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"
+            )}
+          >
+            <span>🛒 {totalBalancePackets.toLocaleString("en-IN")} pkts pending</span>
+          </div>
           <p className="mt-1 text-[11px] text-muted-foreground">
             {totalBalance > 0 ? "Pending market trip procurement" : "All product demand is covered"}
           </p>
@@ -1383,7 +1485,12 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                     .filter((p) => selectedProducts.has(p.product))
                     .reduce((s, p) => s + (p.balance > 0 ? p.balance : p.demand), 0)
                     .toLocaleString("en-IN")}{" "}
-                  kg
+                  kg (
+                  {plans
+                    .filter((p) => selectedProducts.has(p.product))
+                    .reduce((s, p) => s + (p.balance > 0 ? p.balancePackets : p.totalPackets), 0)
+                    .toLocaleString("en-IN")}{" "}
+                  pkts)
                 </span>{" "}
                 procurement volume
               </span>
@@ -1397,8 +1504,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 Active Demand Items ·{" "}
                 <span className="text-primary font-bold">
                   {totalBalance > 0
-                    ? `${formatKg2(totalBalance)} kg pending purchase`
-                    : `${formatKg2(totalDemand)} kg total demand`}
+                    ? `${formatKg2(totalBalance)} kg (${totalBalancePackets.toLocaleString("en-IN")} pkts) pending purchase`
+                    : `${formatKg2(totalDemand)} kg (${totalDemandPackets.toLocaleString("en-IN")} pkts) total demand`}
                 </span>
                 {selectedDate !== "all" && (
                   <span className="ml-1.5 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-semibold text-primary">
@@ -1527,7 +1634,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                       : "bg-muted text-muted-foreground"
                   )}
                 >
-                  {ad.count} {ad.count === 1 ? "PO" : "POs"} · {formatKg2(ad.totalKg)} kg
+                  {ad.count} {ad.count === 1 ? "PO" : "POs"} · {formatKg2(ad.totalKg)} kg ({ad.totalPackets.toLocaleString("en-IN")} pkts)
                 </span>
               </button>
             ))}
@@ -1608,6 +1715,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   ➕ Extra Buffer
                 </th>
                 <th className="px-4 py-3 text-right font-semibold">Total Demand</th>
+                <th className="px-4 py-3 text-center font-semibold text-primary">📦 Packets</th>
                 <th className="px-4 py-3 text-right font-semibold">Actions</th>
               </tr>
             </thead>
@@ -1616,7 +1724,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 dateGroups.map((g) => (
                   <Fragment key={g.date}>
                     <tr className="bg-muted/60 border-y border-border/80">
-                      <td colSpan={8} className="px-4 py-2.5">
+                      <td colSpan={9} className="px-4 py-2.5">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex items-center gap-2">
                             <span className="flex size-6 items-center justify-center rounded-md bg-primary text-primary-foreground font-bold text-xs">
@@ -1635,15 +1743,18 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
                           <div className="flex items-center gap-4 text-xs font-medium">
                             <span className="text-muted-foreground">
-                              Base: <span className="font-semibold text-foreground">{formatKg2(g.baseDemand)} kg</span>
+                              Base: <span className="font-semibold text-foreground">{formatKg2(g.baseDemand)} kg</span>{" "}
+                              <span className="font-mono text-[11px] text-muted-foreground">({g.basePackets.toLocaleString("en-IN")} pkts)</span>
                             </span>
                             {g.extraKg > 0 && (
                               <span className="text-amber-800 dark:text-amber-300">
-                                Buffer: <span className="font-bold">+{formatKg2(g.extraKg)} kg</span>
+                                Buffer: <span className="font-bold">+{formatKg2(g.extraKg)} kg</span>{" "}
+                                <span className="font-mono text-[11px]">(+{Math.max(0, g.totalPackets - g.basePackets)} pkts)</span>
                               </span>
                             )}
                             <span className="text-primary font-bold">
-                              Total Demand: {formatKg2(g.demand)} kg
+                              Total Demand: {formatKg2(g.demand)} kg{" "}
+                              <span className="font-mono">({g.totalPackets.toLocaleString("en-IN")} pkts)</span>
                             </span>
                           </div>
                         </div>
@@ -1676,8 +1787,14 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                           {/* Product Name */}
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-2">
-                              <span className="size-2 rounded-full bg-primary" />
-                              <span className="font-semibold text-foreground">{p.product}</span>
+                              <span className="size-2 rounded-full bg-primary shrink-0" />
+                              <div>
+                                <span className="font-semibold text-foreground block">{p.product}</span>
+                                <span className="inline-flex items-center gap-1 rounded bg-muted/80 px-1.5 py-0.2 font-mono text-[10px] text-muted-foreground border border-border/40 mt-0.5">
+                                  <Package className="size-2.5 text-primary" />
+                                  Pack: {p.defaultPackSize} ({formatKg2(p.packSizeKg)} kg)
+                                </span>
+                              </div>
                             </div>
                           </td>
 
@@ -1695,20 +1812,28 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                               {p.buyers.map((b) => (
                                 <span
                                   key={`${b.buyer}-${b.date}`}
-                                  title={`${b.pos.join(", ")} · Base: ${formatKg2(b.baseQty)} kg${b.extraKg > 0 ? ` (+${formatKg2(b.extraKg)} kg buffer)` : ""}${b.deliveryDate ? ` · Delivery: ${b.deliveryDate}` : ""}`}
+                                  title={`${b.pos.join(", ")} · Base: ${formatKg2(b.baseQty)} kg (${b.basePackets || computePackets(b.baseQty, p.packSizeKg)} pkts)${b.extraKg > 0 ? ` (+${formatKg2(b.extraKg)} kg buffer)` : ""}${b.deliveryDate ? ` · Delivery: ${b.deliveryDate}` : ""}`}
                                   className="inline-flex items-center gap-1.5 rounded-md border border-primary/20 bg-primary/5 px-2 py-0.5 text-xs font-medium text-foreground"
                                 >
                                   <Users className="size-3 text-primary" />
                                   <span>{b.buyer}</span>
                                   <span className="font-semibold text-primary">· {formatKg2(b.baseQty)} kg</span>
+                                  <span className="rounded bg-primary/15 px-1.5 py-0.2 text-[10px] font-bold font-mono text-primary">
+                                    {b.basePackets || computePackets(b.baseQty, p.packSizeKg)} pkts
+                                  </span>
                                 </span>
                               ))}
                             </div>
                           </td>
 
                           {/* Base Demand */}
-                          <td className="px-4 py-3 text-right tabular-nums text-muted-foreground font-medium">
-                            {formatKg2(p.baseDemand)} kg
+                          <td className="px-4 py-3 text-right tabular-nums">
+                            <span className="font-medium text-foreground block">
+                              {formatKg2(p.baseDemand)} kg
+                            </span>
+                            <span className="text-[11px] font-mono text-muted-foreground block">
+                              {p.basePackets.toLocaleString("en-IN")} pkts
+                            </span>
                           </td>
 
                           {/* Extra Buffer KG */}
@@ -1793,12 +1918,31 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                                 <Plus className="size-3" />
                               </button>
                             </div>
+                            {p.extraKg > 0 && (
+                              <span className="text-[10px] font-mono text-amber-700/80 dark:text-amber-400 block text-right mt-0.5">
+                                +{Math.max(0, p.totalPackets - p.basePackets)} pkts buffer
+                              </span>
+                            )}
                           </td>
 
                           {/* Total Demand */}
                           <td className="px-4 py-3 text-right tabular-nums">
                             <span className="font-bold text-foreground text-sm block">
                               {formatKg2(p.demand)} kg
+                            </span>
+                            <span className="text-[11px] font-mono font-medium text-primary block">
+                              {p.totalPackets.toLocaleString("en-IN")} pkts
+                            </span>
+                          </td>
+
+                          {/* Packets Column */}
+                          <td className="px-4 py-3 text-center whitespace-nowrap">
+                            <span className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 font-mono text-xs font-bold text-primary shadow-2xs">
+                              <Package className="size-3" />
+                              {p.totalPackets.toLocaleString("en-IN")} pkts
+                            </span>
+                            <span className="text-[10px] text-muted-foreground block font-mono mt-0.5">
+                              @{p.defaultPackSize}
                             </span>
                           </td>
 
@@ -1849,8 +1993,14 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                       {/* Product Name */}
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
-                          <span className="size-2 rounded-full bg-primary" />
-                          <span className="font-semibold text-foreground">{p.product}</span>
+                          <span className="size-2 rounded-full bg-primary shrink-0" />
+                          <div>
+                            <span className="font-semibold text-foreground block">{p.product}</span>
+                            <span className="inline-flex items-center gap-1 rounded bg-muted/80 px-1.5 py-0.2 font-mono text-[10px] text-muted-foreground border border-border/40 mt-0.5">
+                              <Package className="size-2.5 text-primary" />
+                              Pack: {p.defaultPackSize} ({formatKg2(p.packSizeKg)} kg)
+                            </span>
+                          </div>
                         </div>
                       </td>
 
@@ -1882,12 +2032,15 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                           {p.buyers.map((b) => (
                             <span
                               key={`${b.buyer}-${b.date}`}
-                              title={`${b.pos.join(", ")} · Base: ${formatKg2(b.baseQty)} kg${b.extraKg > 0 ? ` (+${formatKg2(b.extraKg)} kg buffer)` : ""}${b.deliveryDate ? ` · Delivery: ${b.deliveryDate}` : ""}`}
+                              title={`${b.pos.join(", ")} · Base: ${formatKg2(b.baseQty)} kg (${b.basePackets || computePackets(b.baseQty, p.packSizeKg)} pkts)${b.extraKg > 0 ? ` (+${formatKg2(b.extraKg)} kg buffer)` : ""}${b.deliveryDate ? ` · Delivery: ${b.deliveryDate}` : ""}`}
                               className="inline-flex items-center gap-1.5 rounded-md border border-primary/20 bg-primary/5 px-2 py-0.5 text-xs font-medium text-foreground"
                             >
                               <Users className="size-3 text-primary" />
                               <span>{b.buyer}</span>
                               <span className="font-semibold text-primary">· {formatKg2(b.baseQty)} kg</span>
+                              <span className="rounded bg-primary/15 px-1.5 py-0.2 text-[10px] font-bold font-mono text-primary">
+                                {b.basePackets || computePackets(b.baseQty, p.packSizeKg)} pkts
+                              </span>
                               {b.deliveryDate && (
                                 <span className="text-[10px] text-muted-foreground font-mono">
                                   ({b.deliveryDate})
@@ -1899,8 +2052,13 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                       </td>
 
                       {/* Base Demand */}
-                      <td className="px-4 py-3 text-right tabular-nums text-muted-foreground font-medium">
-                        {formatKg2(p.baseDemand)} kg
+                      <td className="px-4 py-3 text-right tabular-nums">
+                        <span className="font-medium text-foreground block">
+                          {formatKg2(p.baseDemand)} kg
+                        </span>
+                        <span className="text-[11px] font-mono text-muted-foreground block">
+                          {p.basePackets.toLocaleString("en-IN")} pkts
+                        </span>
                       </td>
 
                       {/* Extra Buffer KG */}
@@ -1985,12 +2143,31 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                             <Plus className="size-3" />
                           </button>
                         </div>
+                        {p.extraKg > 0 && (
+                          <span className="text-[10px] font-mono text-amber-700/80 dark:text-amber-400 block text-right mt-0.5">
+                            +{Math.max(0, p.totalPackets - p.basePackets)} pkts buffer
+                          </span>
+                        )}
                       </td>
 
                       {/* Total Demand */}
                       <td className="px-4 py-3 text-right tabular-nums">
                         <span className="font-bold text-foreground text-sm block">
                           {formatKg2(p.demand)} kg
+                        </span>
+                        <span className="text-[11px] font-mono font-medium text-primary block">
+                          {p.totalPackets.toLocaleString("en-IN")} pkts
+                        </span>
+                      </td>
+
+                      {/* Packets Column */}
+                      <td className="px-4 py-3 text-center whitespace-nowrap">
+                        <span className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 font-mono text-xs font-bold text-primary shadow-2xs">
+                          <Package className="size-3" />
+                          {p.totalPackets.toLocaleString("en-IN")} pkts
+                        </span>
+                        <span className="text-[10px] text-muted-foreground block font-mono mt-0.5">
+                          @{p.defaultPackSize}
                         </span>
                       </td>
 
@@ -2015,7 +2192,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
               {!filteredPlans.length && (
                 <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground">
+                  <td colSpan={9} className="px-4 py-12 text-center text-muted-foreground">
                     {search || selectedDate !== "all"
                       ? `No products match the selected date "${selectedDate}" or search "${search}".`
                       : "No buyer demand found. Add buyer purchase orders first."}
@@ -3174,6 +3351,9 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 <span className="font-bold text-foreground text-sm mt-0.5 block">
                   {formatKg2(activeProductPlan.baseDemand)} kg
                 </span>
+                <span className="text-[11px] font-mono text-muted-foreground block mt-0.5">
+                  📦 {activeProductPlan.basePackets.toLocaleString("en-IN")} pkts (@ {activeProductPlan.defaultPackSize})
+                </span>
               </div>
               <div>
                 <span className="text-amber-800 dark:text-amber-300 block text-[11px] font-medium flex items-center gap-0.5">
@@ -3182,17 +3362,26 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 <span className="font-bold text-amber-700 dark:text-amber-400 text-sm mt-0.5 block">
                   +{formatKg2(activeProductPlan.extraKg)} kg
                 </span>
+                <span className="text-[11px] font-mono text-amber-700/80 dark:text-amber-300 block mt-0.5">
+                  +{Math.max(0, activeProductPlan.totalPackets - activeProductPlan.basePackets)} pkts buffer
+                </span>
               </div>
               <div>
                 <span className="text-muted-foreground block text-[11px]">Total Consolidated</span>
                 <span className="font-bold text-primary text-sm mt-0.5 block">
                   {formatKg2(activeProductPlan.demand)} kg
                 </span>
+                <span className="text-[11px] font-mono text-primary font-bold block mt-0.5">
+                  📦 {activeProductPlan.totalPackets.toLocaleString("en-IN")} pkts
+                </span>
               </div>
               <div>
                 <span className="text-muted-foreground block text-[11px]">Purchased</span>
                 <span className="font-bold text-emerald-600 dark:text-emerald-400 text-sm mt-0.5 block">
                   {formatKg2(activeProductPlan.purchased)} kg
+                </span>
+                <span className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400 block mt-0.5">
+                  🚚 {activeProductPlan.purchasedPackets.toLocaleString("en-IN")} pkts
                 </span>
               </div>
             </div>
@@ -3213,6 +3402,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                       <th className="px-3 py-2 text-right">Base KG</th>
                       <th className="px-3 py-2 text-right text-amber-700 dark:text-amber-400">Extra Buffer</th>
                       <th className="px-3 py-2 text-right">Total Demand</th>
+                      <th className="px-3 py-2 text-center text-primary font-semibold">📦 Packets</th>
                       <th className="px-3 py-2 text-center">Adjust Buffer</th>
                     </tr>
                   </thead>
@@ -3235,6 +3425,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                             ? round2(poExtra * ratio)
                             : 0;
                         const lineTotal = round2(lineBase + lineExtra);
+                        const linePackets = computePackets(lineTotal, activeProductPlan.packSizeKg);
+                        const basePackets = computePackets(lineBase, activeProductPlan.packSizeKg);
 
                         const isEditing = editingPoBuffer?.poId === poId;
 
@@ -3263,6 +3455,15 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                             </td>
                             <td className="px-3 py-2.5 text-right tabular-nums font-bold text-foreground">
                               {formatKg2(lineTotal)} kg
+                            </td>
+                            <td className="px-3 py-2.5 text-center whitespace-nowrap">
+                              <span className="inline-flex items-center gap-1 rounded bg-primary/10 px-2 py-0.5 font-mono text-[11px] font-bold text-primary">
+                                <Package className="size-2.5" />
+                                {linePackets} pkts
+                              </span>
+                              <span className="text-[10px] text-muted-foreground block font-mono">
+                                (Base: {basePackets} pkts)
+                              </span>
                             </td>
                             <td className="px-3 py-2.5 text-center">
                               {isEditing ? (

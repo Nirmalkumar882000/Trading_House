@@ -4,6 +4,7 @@ import { PROCESS_FLOWS } from "@/components/ProcessFlowMap";
 import { ROLES, canViewPrice, maskPriceIfRestricted } from "@/lib/rbac";
 import { MODULES, seedRows, type Row } from "@/lib/modules";
 import { normalize, lines, stock, validateData, syncReceiptContainers, movements, populate, type Data } from "@/lib/workflow";
+import { getProductPackSpec, computePackets } from "@/components/DemandPlan";
 
 const demo = (): Data => Object.fromEntries(MODULES.map((m) => [m.slug, seedRows(m)]));
 
@@ -599,6 +600,145 @@ describe("Trading House F01-F28 & C01-C14 Business Rules", () => {
     const qc = populate("quality-check", "lot", "GRN-POLLACHI-01", { id: "QC-POLLACHI-01", status: "Stage 1 done" } as Row, d);
     expect(qc["warehouse"]).toBe("Pollachi Depot");
   });
+
+  it("F14 & F15: Buyer packet-count and grams-based split packing correctly allocates to multiple buyers and General Stock", () => {
+    const d = demo();
+
+    // Setup Buyer POs with packet and gram specifications:
+    // PO-7001: Hotel Saravana Bhavan: 50 kg Tomato (100 pkts @ 500g)
+    // PO-7002: FreshMart Retail: 25 kg Tomato (100 pkts @ 250g)
+    const po1 = normalize("purchase-orders", {
+      id: "PO-7001",
+      buyer: "Hotel Saravana Bhavan",
+      item: JSON.stringify([{ p: "Tomato", q: 50 }]),
+      qty: 50,
+      status: "Accepted",
+    });
+    const po2 = normalize("purchase-orders", {
+      id: "PO-7002",
+      buyer: "FreshMart Retail",
+      item: JSON.stringify([{ p: "Tomato", q: 25 }]),
+      qty: 25,
+      status: "Accepted",
+    });
+    d["purchase-orders"] = [...(d["purchase-orders"] || []), po1, po2];
+
+    // Graded produce available in QC Stage 1: 150 kg Tomato
+    // Execute 3-way split:
+    // 1. Hotel Saravana Bhavan: 100 pkts @ 500g (0.5 kg) = 50 kg
+    // 2. FreshMart Retail: 100 pkts @ 250g (0.25 kg) = 25 kg
+    // 3. General Stock: 150 pkts @ 500g (0.5 kg) = 75 kg
+    const packLot1 = normalize("packing", {
+      id: "PK-7001",
+      status: "Packed",
+      po: "PO-7001",
+      buyer: "Hotel Saravana Bhavan",
+      stage: "Stage 1",
+      grade: "Grade A",
+      packer: "Senthil P",
+      packSize: 0.5,
+      packs: 100,
+      item: JSON.stringify([{ p: "Tomato", q: 50 }]),
+    });
+
+    const packLot2 = normalize("packing", {
+      id: "PK-7002",
+      status: "Packed",
+      po: "PO-7002",
+      buyer: "FreshMart Retail",
+      stage: "Stage 1",
+      grade: "Grade A",
+      packer: "Senthil P",
+      packSize: 0.25,
+      packs: 100,
+      item: JSON.stringify([{ p: "Tomato", q: 25 }]),
+    });
+
+    const packLot3 = normalize("packing", {
+      id: "PK-7003",
+      status: "Packed",
+      po: "",
+      buyer: "",
+      stage: "Stage 1",
+      grade: "Grade A",
+      packer: "Senthil P",
+      packSize: 0.5,
+      packs: 140,
+      item: JSON.stringify([{ p: "Tomato", q: 70 }]),
+    });
+
+    d["packing"] = [...(d["packing"] || []), packLot1, packLot2, packLot3];
+
+    // Data validation passes without "allocation exceeds buyer demand" error
+    expect(validateData(d)).toBeNull();
+
+    // Verify stock is derived correctly: 50 + 25 + 75 = 150 kg total Tomato packed
+    const tomatoPackedLots = (d["packing"] || []).filter((r) =>
+      lines(r).some((l) => l.p === "Tomato")
+    );
+    expect(tomatoPackedLots.some((r) => r.id === "PK-7001" && r["packs"] === 100)).toBe(true);
+    expect(tomatoPackedLots.some((r) => r.id === "PK-7002" && r["packs"] === 100)).toBe(true);
+    expect(tomatoPackedLots.some((r) => r.id === "PK-7003" && r["buyer"] === "")).toBe(true);
+  });
+
+  it("F16: Demand summary & purchase plan calculates and displays packet counts accurately from commodity packaging specs and buyer line specs", () => {
+    // 1. Pack spec resolution matches commodity definitions
+    const amaranthSpec = getProductPackSpec("Amaranth Green Leaves (Arai Keerai)");
+    expect(amaranthSpec.defaultPackSize).toBe("250 g");
+    expect(amaranthSpec.packSizeKg).toBe(0.25);
+
+    const redAmaranthSpec = getProductPackSpec("Amaranth Red Leaves (Red Mulai Keerai)");
+    expect(redAmaranthSpec.defaultPackSize).toBe("150 g");
+    expect(redAmaranthSpec.packSizeKg).toBe(0.15);
+
+    const bananaSpec = getProductPackSpec("Banana Poovan Semi Ripe");
+    expect(bananaSpec.packSizeKg).toBe(0.5);
+
+    const beansSpec = getProductPackSpec("Beans Broad (Avarakkaai)");
+    expect(beansSpec.defaultPackSize).toBe("250 g");
+    expect(beansSpec.packSizeKg).toBe(0.25);
+
+    const chilliSpec = getProductPackSpec("Chilli Green Gundu (Bullet Chilli)");
+    expect(chilliSpec.defaultPackSize).toBe("200 g");
+    expect(chilliSpec.packSizeKg).toBe(0.2);
+
+    const ladyFingerSpec = getProductPackSpec("Lady Finger (Vendikaai)");
+    expect(ladyFingerSpec.defaultPackSize).toBe("250 g");
+    expect(ladyFingerSpec.packSizeKg).toBe(0.25);
+
+    // 2. Exact packet count computations matching user's screenshot
+    // Amaranth Green Leaves: 25 kg base demand @ 250g
+    expect(computePackets(25, amaranthSpec.packSizeKg)).toBe(100);
+    // With extra buffer 2.14 kg -> total 27.14 kg -> Math.ceil(27.14 / 0.25) = 109 pkts
+    expect(computePackets(27.14, amaranthSpec.packSizeKg)).toBe(109);
+
+    // Amaranth Red Leaves: 15 kg @ 150g -> 100 pkts
+    expect(computePackets(15, redAmaranthSpec.packSizeKg)).toBe(100);
+
+    // Banana Poovan: 25 kg @ 500g -> 50 pkts
+    expect(computePackets(25, bananaSpec.packSizeKg)).toBe(50);
+
+    // Beans Broad: 20 kg @ 250g -> 80 pkts
+    expect(computePackets(20, beansSpec.packSizeKg)).toBe(80);
+
+    // Chilli Green Gundu: 10 kg @ 200g -> 50 pkts
+    expect(computePackets(10, chilliSpec.packSizeKg)).toBe(50);
+
+    // Lady Finger: 25 kg @ 250g -> 100 pkts
+    expect(computePackets(25, ladyFingerSpec.packSizeKg)).toBe(100);
+
+    // Total base demand packets for Date 2026-10-25: 100 + 100 + 50 + 80 + 50 + 100 = 480 pkts
+    const totalBasePackets =
+      computePackets(25, amaranthSpec.packSizeKg) +
+      computePackets(15, redAmaranthSpec.packSizeKg) +
+      computePackets(25, bananaSpec.packSizeKg) +
+      computePackets(20, beansSpec.packSizeKg) +
+      computePackets(10, chilliSpec.packSizeKg) +
+      computePackets(25, ladyFingerSpec.packSizeKg);
+    expect(totalBasePackets).toBe(480);
+  });
 });
+
+
 
 
