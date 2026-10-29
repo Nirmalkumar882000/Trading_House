@@ -2,7 +2,7 @@ import { useState } from "react";
 import { FileText, Printer, Check, X, Scale, Truck, UserCheck, ShieldCheck, ArrowRight } from "lucide-react";
 import { Button } from "./ui/button";
 import { toast } from "sonner";
-import { type Row } from "@/lib/modules";
+import { type Row, DEFAULT_WAREHOUSE } from "@/lib/modules";
 import { parseLines, num } from "@/lib/workflow";
 import { Link } from "@tanstack/react-router";
 
@@ -29,7 +29,7 @@ export function GoodsReceiptVoucherModal({
   const dcNo = String(receipt["dc"] || "TRP-1001");
   const date = String(receipt["date"] || new Date().toISOString().split("T")[0]);
   const supervisor = String(receipt["person"] || receipt["responsible"] || "Ravi Kumar");
-  const warehouse = String(receipt["warehouse"] || trip?.["warehouse"] || "Main Warehouse (Koyambedu)");
+  const warehouse = String(receipt["warehouse"] || trip?.["warehouse"] || DEFAULT_WAREHOUSE);
   const transporter = String(trip?.["transporter"] || "Chennai Fresh Logistics");
   const vehicle = String(trip?.["vehicle"] || "TN 09 AB 1234");
   const driver = String(trip?.["driver"] || "Raja");

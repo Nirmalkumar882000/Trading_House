@@ -547,7 +547,7 @@ describe("Trading House F01-F28 & C01-C14 Business Rules", () => {
     const d = demo();
 
     const trip: Row = normalize("trips", {
-      id: "TRP-NORTH-01",
+      id: "TRP-POLLACHI-01",
       date: "2026-10-28",
       supplier: "Murugan Traders",
       item: JSON.stringify([{ p: "Tomato", q: 300 }]),
@@ -556,16 +556,16 @@ describe("Trading House F01-F28 & C01-C14 Business Rules", () => {
       amount: 8400,
       signatures: "3",
       status: "Submitted",
-      warehouse: "North Depot (Madhavaram)",
+      warehouse: "Pollachi Depot",
     });
     d["trips"] = [...(d["trips"] || []), trip];
 
     // 1. Post a new GRN with explicit receiving warehouse
     const receipt: Row = normalize("receipts", {
-      id: "GRN-NORTH-01",
+      id: "GRN-POLLACHI-01",
       date: "2026-10-28",
-      dc: "TRP-NORTH-01",
-      warehouse: "North Depot (Madhavaram)",
+      dc: "TRP-POLLACHI-01",
+      warehouse: "Pollachi Depot",
       item: JSON.stringify([{ p: "Tomato", q: 300 }]),
       sent: 300,
       received: 300,
@@ -578,26 +578,26 @@ describe("Trading House F01-F28 & C01-C14 Business Rules", () => {
     d["receipts"] = [...(d["receipts"] || []), receipt];
 
     // Validate that warehouse is preserved and defaults correctly
-    expect(receipt["warehouse"]).toBe("North Depot (Madhavaram)");
+    expect(receipt["warehouse"]).toBe("Pollachi Depot");
     expect(validateData(d)).toBeNull();
 
     // 2. Check that movements inherit the warehouse
     const moves = movements(d);
-    const grnMove = moves.find((m) => m.ref === "GRN-NORTH-01");
+    const grnMove = moves.find((m) => m.ref === "GRN-POLLACHI-01");
     expect(grnMove).toBeDefined();
-    expect(grnMove?.warehouse).toBe("North Depot (Madhavaram)");
+    expect(grnMove?.warehouse).toBe("Pollachi Depot");
     expect(grnMove?.source).toBe("Market");
     expect(grnMove?.destination).toBe("Ungraded");
     expect(grnMove?.qty).toBe(300);
 
     // 3. Check warehouse-specific stock filtering
-    const northStock = stock(d, "North Depot (Madhavaram)");
-    const northTomatoUngraded = northStock.find((s) => s.product === "Tomato" && s.category === "Ungraded");
-    expect(northTomatoUngraded?.qty).toBe(300);
+    const pollachiStock = stock(d, "Pollachi Depot");
+    const pollachiTomatoUngraded = pollachiStock.find((s) => s.product === "Tomato" && s.category === "Ungraded");
+    expect(pollachiTomatoUngraded?.qty).toBe(300);
 
     // 4. Quality check inherits warehouse from the source GRN
-    const qc = populate("quality-check", "lot", "GRN-NORTH-01", { id: "QC-NORTH-01", status: "Stage 1 done" } as Row, d);
-    expect(qc["warehouse"]).toBe("North Depot (Madhavaram)");
+    const qc = populate("quality-check", "lot", "GRN-POLLACHI-01", { id: "QC-POLLACHI-01", status: "Stage 1 done" } as Row, d);
+    expect(qc["warehouse"]).toBe("Pollachi Depot");
   });
 });
 

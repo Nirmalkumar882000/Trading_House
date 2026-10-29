@@ -1,7 +1,7 @@
 import type { Row } from './modules';
 import { WAREHOUSES, DEFAULT_WAREHOUSE } from './modules';
 export type Data = Record<string, Row[]>;
-export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; packKg?: number; packLabel?: string };
+export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; packKg?: number; packLabel?: string; containerType?: string; containerCount?: number; extraKg?: number };
 export const num = (v: unknown) => Number(v) || 0;
 export const round = (v: number) => Math.round(v * 1000) / 1000;
 export function parseLines(v: unknown): ProductLine[] {
@@ -16,6 +16,9 @@ export function parseLines(v: unknown): ProductLine[] {
         ...(l.r !== undefined ? { r: num(l.r) } : {}),
         ...(l.packKg !== undefined ? { packKg: num(l.packKg) } : {}),
         ...(l.packLabel !== undefined ? { packLabel: String(l.packLabel) } : {}),
+        ...(l.containerType !== undefined ? { containerType: String(l.containerType) } : {}),
+        ...(l.containerCount !== undefined ? { containerCount: num(l.containerCount) } : {}),
+        ...(l.extraKg !== undefined ? { extraKg: num(l.extraKg) } : {}),
       }));
     }
   } catch { /* legacy product names */ }
@@ -121,7 +124,8 @@ export function normalize(slug: string, r: Row): Row {
   const full = { ...r };
   if (ls.length) { full['item'] = JSON.stringify(ls); full['qty'] = qty; }
   if (slug === 'purchase-orders') {
-    const extra = num(r['extraKg']);
+    const hasLineExtra = ls.some(l => l.extraKg !== undefined);
+    const extra = hasLineExtra ? round(ls.reduce((s, l) => s + (num(l.extraKg) || 0), 0)) : num(r['extraKg']);
     full['extraKg'] = extra;
     full['qty'] = round(qty + extra);
   }
@@ -471,7 +475,7 @@ export function validateData(data: Data): string | null {
         if (po) for (const l of ls) {
           const allocated=(data['packing'] || []).filter(x=>x['po']===r['po']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0);
           const poLs = lines(po); const totalBase = poLs.reduce((s, x) => s + x.q, 0); const poLine = poLs.find(x => x.p === l.p);
-          const extra = num(po['extraKg']); const extraShare = extra > 0 && poLine ? (totalBase > 0 ? (extra * poLine.q / totalBase) : (extra / Math.max(1, poLs.length))) : 0;
+          const extra = num(po['extraKg']); const extraShare = poLine?.extraKg !== undefined ? num(poLine.extraKg) : (extra > 0 && poLine ? (totalBase > 0 ? (extra * poLine.q / totalBase) : (extra / Math.max(1, poLs.length))) : 0);
           const maxAllowed = (poLine?.q || 0) + extraShare;
           if (allocated > maxAllowed + 0.001) return `${l.p}: allocation exceeds buyer demand.`;
         }
@@ -482,7 +486,7 @@ export function validateData(data: Data): string | null {
         for (const l of ls) {
           const sold=(data['sales-orders'] || []).filter(x=>x['po']===r['po']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0);
           const poLs = lines(po); const totalBase = poLs.reduce((s, x) => s + x.q, 0); const poLine = poLs.find(x => x.p === l.p);
-          const extra = num(po['extraKg']); const extraShare = extra > 0 && poLine ? (totalBase > 0 ? (extra * poLine.q / totalBase) : (extra / Math.max(1, poLs.length))) : 0;
+          const extra = num(po['extraKg']); const extraShare = poLine?.extraKg !== undefined ? num(poLine.extraKg) : (extra > 0 && poLine ? (totalBase > 0 ? (extra * poLine.q / totalBase) : (extra / Math.max(1, poLs.length))) : 0);
           const maxAllowed = (poLine?.q || 0) + extraShare;
           if (sold > maxAllowed + 0.001) return `${l.p}: sale exceeds buyer demand.`;
         }

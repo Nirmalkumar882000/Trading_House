@@ -443,7 +443,7 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
           {processGuideTab === "inward" ? (
             <div className="space-y-2">
               <p className="text-xs text-muted-foreground">
-                <strong className="text-amber-800 dark:text-amber-300">Inward Return Concept:</strong> Returning rejected produce (identified during Quality Check inspection) or returning empty supplier crates back to the Koyambedu wholesale market vendor.
+                <strong className="text-amber-800 dark:text-amber-300">Inward Return Concept:</strong> Returning rejected produce (identified during Quality Check inspection) or returning empty supplier crates back to the Udumalaipet wholesale market vendor.
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 pt-1 text-xs">
                 <div className="rounded-xl border bg-card p-3 space-y-1">
@@ -1146,7 +1146,7 @@ function TransportGatePassModal({
                   Velaan Bay Trading House
                 </h2>
                 <p className="text-xs text-muted-foreground">
-                  Wholesale Agri Logistics & Cold-Chain Fleet Gateway · Koyambedu Terminal
+                  Wholesale Agri Logistics & Cold-Chain Fleet Gateway · Udumalaipet Terminal
                 </p>
               </div>
               <div className="text-right">
@@ -1167,7 +1167,7 @@ function TransportGatePassModal({
                   {isPickup ? party.name : "Velaan Bay Central Warehouse"}
                 </p>
                 <p className="text-[11px] text-muted-foreground">
-                  {isPickup ? party.subtitle : "Koyambedu Gate #4, Chennai"}
+                  {isPickup ? party.subtitle : "Udumalaipet Mandi Gate #2, Udumalaipet"}
                 </p>
               </div>
 
@@ -1870,7 +1870,7 @@ function InwardReturnModal({
                 </span>
               </div>
               <p className="text-xs text-muted-foreground">
-                Return rejected produce failing Stage E specs or return empty crates to Koyambedu vendor
+                Return rejected produce failing Stage E specs or return empty crates to Udumalaipet vendor
               </p>
             </div>
           </div>
@@ -1894,7 +1894,7 @@ function InwardReturnModal({
               <span className="text-[10px] font-mono">Gate Pass (F09) · Debit Note</span>
             </div>
             <p className="text-muted-foreground text-[11px]">
-              This movement creates an official Return Gate Pass and assigns a transport vehicle to dispatch rejected goods back to the Koyambedu wholesale stall. Vendor payables will be adjusted accordingly.
+              This movement creates an official Return Gate Pass and assigns a transport vehicle to dispatch rejected goods back to the Udumalaipet wholesale stall. Vendor payables will be adjusted accordingly.
             </p>
           </div>
 

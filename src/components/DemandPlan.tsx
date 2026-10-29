@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, Fragment } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ShoppingCart,
@@ -32,6 +32,7 @@ import {
   Plus,
   UserCheck,
   Phone,
+  Calendar,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ITEMS, PRODUCT_CATALOG, SUPPLIERS, BUYERS, type ModuleDef, type Row } from "@/lib/modules";
@@ -46,6 +47,9 @@ type BuyerDemandItem = {
   extraKg: number;
   qty: number;
   pos: string[];
+  date?: string;
+  deliveryDate?: string;
+  targetDate?: string;
 };
 
 type ProductPlan = {
@@ -57,6 +61,9 @@ type ProductPlan = {
   reserved: number;
   balance: number;
   buyers: BuyerDemandItem[];
+  deliveryDates: string[];
+  orderDates: string[];
+  primaryDate: string;
 };
 
 interface TripModalItem {
@@ -81,6 +88,12 @@ interface InwardReturnItem {
 // Step size (kg) for the quick +/- buffer stepper on the consolidation table.
 const BUFFER_STEP = 5;
 
+export const round2 = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
+export const formatKg2 = (v: number) => {
+  const val = round2(v);
+  return val.toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+};
+
 export function DemandPlan({ mod }: { mod: ModuleDef }) {
   const { data, upsert, nextId, catalog } = useStore();
   const navigate = useNavigate();
@@ -89,6 +102,9 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
   const [filterTab, setFilterTab] = useState<"all" | "pending" | "fulfilled">("all");
   const [selectedProduct, setSelectedProduct] = useState<ProductPlan | null>(null);
   const [editingPoBuffer, setEditingPoBuffer] = useState<{ poId: string; buffer: number } | null>(null);
+  const [bufferInputs, setBufferInputs] = useState<Record<string, string>>({});
+  const [selectedDate, setSelectedDate] = useState<string>("all");
+  const [viewMode, setViewMode] = useState<"grouped" | "consolidated">("grouped");
 
   // Multi-selection for bulk planning
   const [selectedProducts, setSelectedProducts] = useState<Set<string>>(new Set());
@@ -111,7 +127,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
   );
   const [tripStatus, setTripStatus] = useState<string>("Submitted");
-  const [tripFromLocation, setTripFromLocation] = useState<string>("Koyambedu Wholesale Mandi (Supplier Stall)");
+  const [tripFromLocation, setTripFromLocation] = useState<string>("Udumalaipet Wholesale Mandi (Supplier Stall)");
   const [tripToLocation, setTripToLocation] = useState<string>("Velaan Bay Warehouse (Receiving Bay)");
   const [tripManagerName, setTripManagerName] = useState<string>("Suresh Kumar (Purchase Manager)");
   const [tripManagerPhone, setTripManagerPhone] = useState<string>("9840234567");
@@ -153,19 +169,49 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
     if (fromStore.length) return fromStore;
     return [
-      { name: "Chennai Fresh Logistics", vehicle: "TN 09 AB 1234", driver: "Raja", phone: "9840012345" },
-      { name: "Koyambedu Speed Transports", vehicle: "TN 22 CD 5678", driver: "Ganesh", phone: "9841098765" },
-      { name: "Kaveri Express Cargo", vehicle: "TN 07 EF 9012", driver: "Suresh", phone: "9444054321" },
+      { name: "Kongu Agri Logistics", vehicle: "TN 78 AB 1234", driver: "Raja", phone: "9840012345" },
+      { name: "Pollachi Express Cargo", vehicle: "TN 41 CD 5678", driver: "Ganesh", phone: "9841098765" },
+      { name: "Anamalai Roadways", vehicle: "TN 39 EF 9012", driver: "Suresh", phone: "9444054321" },
     ];
   }, [data]);
 
-  // 1) Calculate comprehensive consolidation plan with exact extraKg breakdown
+  // Extract all available delivery & order dates from purchase orders with PO count and total KG
+  const availableDates = useMemo(() => {
+    const datesMap = new Map<string, { count: number; totalKg: number }>();
+    for (const po of data["purchase-orders"] ?? []) {
+      if (po.status === "Rejected") continue;
+      const d = String(po["deliveryDate"] || po["date"] || "Prompt").trim();
+      const qty = Number(po["qty"]) || 0;
+      const current = datesMap.get(d) || { count: 0, totalKg: 0 };
+      datesMap.set(d, {
+        count: current.count + 1,
+        totalKg: round2(current.totalKg + qty),
+      });
+    }
+    return Array.from(datesMap.entries())
+      .map(([date, info]) => ({ date, ...info }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [data]);
+
+  // 1) Calculate comprehensive consolidation plan with exact extraKg breakdown and date tracking
   const plans = useMemo<ProductPlan[]>(() => {
     const map = new Map<string, ProductPlan>();
     const get = (p: string): ProductPlan => {
       let r = map.get(p);
       if (!r) {
-        r = { product: p, baseDemand: 0, extraKg: 0, demand: 0, purchased: 0, reserved: 0, balance: 0, buyers: [] };
+        r = {
+          product: p,
+          baseDemand: 0,
+          extraKg: 0,
+          demand: 0,
+          purchased: 0,
+          reserved: 0,
+          balance: 0,
+          buyers: [],
+          deliveryDates: [],
+          orderDates: [],
+          primaryDate: "",
+        };
         map.set(p, r);
       }
       return r;
@@ -174,6 +220,14 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     // Buyer demand: every PO line, per buyer, excluding rejected POs
     for (const po of data["purchase-orders"] ?? []) {
       if (po.status === "Rejected") continue;
+      const poOrderDate = String(po["date"] || "").trim();
+      const poDeliveryDate = String(po["deliveryDate"] || "").trim();
+      const targetDate = poDeliveryDate || poOrderDate || "Prompt";
+
+      if (selectedDate !== "all" && targetDate !== selectedDate && poOrderDate !== selectedDate) {
+        continue;
+      }
+
       const lines = parseLines(po["item"]);
       const totalBase = lines.reduce((a, l) => a + (Number(l.q) || 0), 0);
       const poExtraKg = Number(po["extraKg"]) || 0;
@@ -183,22 +237,43 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
           Number(l.q) ||
           (lines.length === 1 ? Number(po["qty"]) || 0 : totalBase ? 0 : Math.round((Number(po["qty"]) || 0) / lines.length));
         const lineRatio = totalBase > 0 ? lineBase / totalBase : 1 / Math.max(1, lines.length);
-        const extraShare = poExtraKg > 0 ? round(poExtraKg * lineRatio) : 0;
-        const lineTotal = round(lineBase + extraShare);
+        const extraShare =
+          l.extraKg !== undefined
+            ? round2(Number(l.extraKg) || 0)
+            : poExtraKg > 0
+            ? round2(poExtraKg * lineRatio)
+            : 0;
+        const lineTotal = round2(lineBase + extraShare);
 
         const plan = get(l.p);
-        plan.baseDemand = round(plan.baseDemand + lineBase);
-        plan.extraKg = round(plan.extraKg + extraShare);
-        plan.demand = round(plan.demand + lineTotal);
+        plan.baseDemand = round2(plan.baseDemand + lineBase);
+        plan.extraKg = round2(plan.extraKg + extraShare);
+        plan.demand = round2(plan.demand + lineTotal);
+        if (poDeliveryDate && !plan.deliveryDates.includes(poDeliveryDate)) {
+          plan.deliveryDates.push(poDeliveryDate);
+        }
+        if (poOrderDate && !plan.orderDates.includes(poOrderDate)) {
+          plan.orderDates.push(poOrderDate);
+        }
+        if (!plan.primaryDate) plan.primaryDate = targetDate;
 
         let b = plan.buyers.find((x) => x.buyer === po["buyer"]);
         if (!b) {
-          b = { buyer: String(po["buyer"]), baseQty: 0, extraKg: 0, qty: 0, pos: [] };
+          b = {
+            buyer: String(po["buyer"]),
+            baseQty: 0,
+            extraKg: 0,
+            qty: 0,
+            pos: [],
+            date: poOrderDate,
+            deliveryDate: poDeliveryDate,
+            targetDate,
+          };
           plan.buyers.push(b);
         }
-        b.baseQty = round(b.baseQty + lineBase);
-        b.extraKg = round(b.extraKg + extraShare);
-        b.qty = round(b.qty + lineTotal);
+        b.baseQty = round2(b.baseQty + lineBase);
+        b.extraKg = round2(b.extraKg + extraShare);
+        b.qty = round2(b.qty + lineTotal);
         if (!b.pos.includes(po.id)) b.pos.push(po.id);
       }
     }
@@ -209,11 +284,11 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       const totalQ = lines.reduce((a, l) => a + (Number(l.q) || 0), 0);
       for (const l of lines) {
         const qty = l.q || (lines.length === 1 ? Number(t["net"]) || 0 : totalQ ? 0 : 0);
-        if (qty) {
+        if (qty && map.has(l.p)) {
           if (t.status === "Submitted") {
-            get(l.p).purchased = round(get(l.p).purchased + qty);
+            get(l.p).purchased = round2(get(l.p).purchased + qty);
           } else {
-            get(l.p).reserved = round(get(l.p).reserved + qty);
+            get(l.p).reserved = round2(get(l.p).reserved + qty);
           }
         }
       }
@@ -224,18 +299,18 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     return [...known, ...extra].flatMap((k) => {
       const plan = map.get(k);
       if (!plan) return [];
-      plan.balance = Math.max(0, round(plan.demand - plan.purchased - plan.reserved));
+      plan.balance = Math.max(0, round2(plan.demand - plan.purchased - plan.reserved));
       return [plan];
     });
-  }, [data]);
+  }, [data, selectedDate]);
 
-  // Aggregated KPI numbers
-  const totalBaseDemand = useMemo(() => round(plans.reduce((a, p) => a + p.baseDemand, 0)), [plans]);
-  const totalExtraKg = useMemo(() => round(plans.reduce((a, p) => a + p.extraKg, 0)), [plans]);
-  const totalDemand = useMemo(() => round(plans.reduce((a, p) => a + p.demand, 0)), [plans]);
-  const totalPurchased = useMemo(() => round(plans.reduce((a, p) => a + p.purchased, 0)), [plans]);
-  const totalReserved = useMemo(() => round(plans.reduce((a, p) => a + p.reserved, 0)), [plans]);
-  const totalBalance = useMemo(() => round(plans.reduce((a, p) => a + p.balance, 0)), [plans]);
+  // Aggregated KPI numbers (rounded to 2 decimal places)
+  const totalBaseDemand = useMemo(() => round2(plans.reduce((a, p) => a + p.baseDemand, 0)), [plans]);
+  const totalExtraKg = useMemo(() => round2(plans.reduce((a, p) => a + p.extraKg, 0)), [plans]);
+  const totalDemand = useMemo(() => round2(plans.reduce((a, p) => a + p.demand, 0)), [plans]);
+  const totalPurchased = useMemo(() => round2(plans.reduce((a, p) => a + p.purchased, 0)), [plans]);
+  const totalReserved = useMemo(() => round2(plans.reduce((a, p) => a + p.reserved, 0)), [plans]);
+  const totalBalance = useMemo(() => round2(plans.reduce((a, p) => a + p.balance, 0)), [plans]);
 
   // Filtered plans based on search & tab
   const filteredPlans = useMemo(() => {
@@ -252,6 +327,50 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       return true;
     });
   }, [plans, filterTab, search]);
+
+  type DateGroupedPlan = {
+    date: string;
+    label: string;
+    totalPos: number;
+    baseDemand: number;
+    extraKg: number;
+    demand: number;
+    plans: ProductPlan[];
+  };
+
+  const dateGroups = useMemo<DateGroupedPlan[]>(() => {
+    const groupsMap = new Map<string, { date: string; plans: ProductPlan[]; baseDemand: number; extraKg: number; demand: number; pos: Set<string> }>();
+
+    for (const p of filteredPlans) {
+      const datesToGroup = p.deliveryDates.length ? p.deliveryDates : [p.primaryDate || "Prompt"];
+      for (const d of datesToGroup) {
+        let g = groupsMap.get(d);
+        if (!g) {
+          g = { date: d, plans: [], baseDemand: 0, extraKg: 0, demand: 0, pos: new Set() };
+          groupsMap.set(d, g);
+        }
+        if (!g.plans.some((x) => x.product === p.product)) {
+          g.plans.push(p);
+          g.baseDemand = round2(g.baseDemand + p.baseDemand);
+          g.extraKg = round2(g.extraKg + p.extraKg);
+          g.demand = round2(g.demand + p.demand);
+          p.buyers.forEach((b) => b.pos.forEach((id) => g.pos.add(id)));
+        }
+      }
+    }
+
+    return Array.from(groupsMap.values())
+      .map((g) => ({
+        date: g.date,
+        label: g.date === "Prompt" ? "Prompt / Same-Day Orders" : `Delivery Date: ${g.date}`,
+        totalPos: g.pos.size,
+        baseDemand: g.baseDemand,
+        extraKg: g.extraKg,
+        demand: g.demand,
+        plans: g.plans,
+      }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [filteredPlans]);
 
   // Selection helpers
   const handleToggleSelectProduct = (product: string) => {
@@ -279,7 +398,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     }
 
     const items: TripModalItem[] = productsToPlan.map((p) => {
-      let defaultRate = 28;
+      let defaultRate = 0;
       for (const t of data["trips"] ?? []) {
         if (t["buys"]) {
           const b = parseBuys(t["buys"]).find((x) => x.p === p.product);
@@ -354,11 +473,11 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     setTripFromLocation(
       direction === "Inward Return"
         ? "Velaan Bay Warehouse (Receiving Bay)"
-        : "Koyambedu Wholesale Mandi (Supplier Stall)"
+        : "Udumalaipet Wholesale Mandi (Supplier Stall)"
     );
     setTripToLocation(
       direction === "Inward Return"
-        ? "Koyambedu Wholesale Mandi (Supplier Stall)"
+        ? "Udumalaipet Wholesale Mandi (Supplier Stall)"
         : "Velaan Bay Warehouse (Receiving Bay)"
     );
     setTripManagerName(
@@ -408,7 +527,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       const extraKg = foundPlan ? foundPlan.extraKg : 0;
       const targetQty = foundPlan ? (foundPlan.balance > 0 ? foundPlan.balance : foundPlan.demand) : item.qty || 25;
 
-      let defaultRate = item.rate || 28;
+      let defaultRate = item.rate || 0;
       for (const t of data["trips"] ?? []) {
         if (t["buys"]) {
           const b = parseBuys(t["buys"]).find((x) => x.p === newProduct && (!item.supplier || x.s === item.supplier));
@@ -481,7 +600,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       product: nextProduct,
       supplier: tripSupplier || suppliersList[0] || "Murugan Traders",
       qty: targetQty,
-      rate: 28,
+      rate: 0,
       totalDemand: foundPlan ? foundPlan.demand : 0,
       baseDemand: foundPlan ? foundPlan.baseDemand : 0,
       extraKg: foundPlan ? foundPlan.extraKg : 0,
@@ -613,7 +732,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       `*Transport Movement Ref:* ${transport.id}\n` +
       `*Delivery Challan (DC):* ${transport["dc"] || "—"}\n` +
       `*Date & Time:* ${transport["date"]} at ${transport["time"] || "—"}\n` +
-      `*Route:* ${transport["fromLocation"] || "Velaan Bay"} ➔ ${transport["toLocation"] || "Koyambedu Mandi"}\n` +
+      `*Route:* ${transport["fromLocation"] || "Velaan Bay"} ➔ ${transport["toLocation"] || "Udumalaipet Mandi"}\n` +
       `*Trip Status:* ${transport.status}\n\n` +
       `*Returned Containers Breakdown:*\n${detailsText}\n\n` +
       `*Total Return Count:* ${transport["containerCount"]} units\n` +
@@ -834,9 +953,9 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       `*Transport Movement Ref:* ${transport.id} (${transport["direction"]})\n` +
       `*Delivery Challan (DC):* ${trip["dc"]}\n` +
       `*Trip Date:* ${trip["date"]}${trip["time"] ? ` at ${trip["time"]}` : ""}\n` +
-      `*Route:* ${transport["fromLocation"] || "Koyambedu Mandi"} ➔ ${transport["toLocation"] || "Velaan Bay"}\n` +
+      `*Route:* ${transport["fromLocation"] || "Udumalaipet Mandi"} ➔ ${transport["toLocation"] || "Velaan Bay"}\n` +
       `*Status:* ${trip.status}\n\n` +
-      `*Market Supplier:* ${trip["supplier"]} (Koyambedu Wholesale Mandi)\n` +
+      `*Market Supplier:* ${trip["supplier"]} (Udumalaipet Wholesale Mandi)\n` +
       `*Fleet / Purchase Manager:* ${transport["managerName"] || trip["managerName"]} (Ph: ${transport["managerPhone"] || trip["managerPhone"] || "—"})\n` +
       `*Transporter:* ${trip["transporter"]}\n` +
       `*Vehicle No:* ${trip["vehicle"]}\n` +
@@ -861,23 +980,26 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
     const itemsText = targetPlans
       .map((p) => {
-        const bufferTag = p.extraKg > 0 ? ` [incl. +${p.extraKg} kg buffer]` : "";
-        const balTag = p.balance > 0 ? `⚠️ *Buy: ${p.balance} kg*` : (p.reserved > 0 ? "🚚 Planned in Trip" : "✅ Fulfilled");
-        const buyersList = p.buyers.map((b) => `${b.buyer} (${b.qty}kg)`).join(", ");
-        return `• *${p.product}*: Demand ${p.demand} kg${bufferTag} | Mkt: ${p.purchased} kg | ${balTag}\n   _Buyers: ${buyersList}_`;
+        const bufferTag = p.extraKg > 0 ? ` [incl. +${formatKg2(p.extraKg)} kg buffer]` : "";
+        const balTag = p.balance > 0 ? `⚠️ *Buy: ${formatKg2(p.balance)} kg*` : (p.reserved > 0 ? "🚚 Planned in Trip" : "✅ Fulfilled");
+        const datesTag = p.deliveryDates.length ? ` · Due: ${p.deliveryDates.join(", ")}` : (p.primaryDate ? ` · Due: ${p.primaryDate}` : "");
+        const buyersList = p.buyers.map((b) => `${b.buyer} (${formatKg2(b.qty)}kg)`).join(", ");
+        return `• *${p.product}*${datesTag}: Demand ${formatKg2(p.demand)} kg${bufferTag} | Mkt: ${formatKg2(p.purchased)} kg | ${balTag}\n   _Buyers: ${buyersList}_`;
       })
       .join("\n");
 
-    const sumDemand = round(targetPlans.reduce((s, p) => s + p.demand, 0));
-    const sumBase = round(targetPlans.reduce((s, p) => s + p.baseDemand, 0));
-    const sumExtra = round(targetPlans.reduce((s, p) => s + p.extraKg, 0));
-    const sumPurchased = round(targetPlans.reduce((s, p) => s + p.purchased, 0));
-    const sumBalance = round(targetPlans.reduce((s, p) => s + p.balance, 0));
+    const sumDemand = round2(targetPlans.reduce((s, p) => s + p.demand, 0));
+    const sumBase = round2(targetPlans.reduce((s, p) => s + p.baseDemand, 0));
+    const sumExtra = round2(targetPlans.reduce((s, p) => s + p.extraKg, 0));
+    const sumPurchased = round2(targetPlans.reduce((s, p) => s + p.purchased, 0));
+    const sumBalance = round2(targetPlans.reduce((s, p) => s + p.balance, 0));
+    const dateTitle = selectedDate !== "all" ? ` (Delivery: ${selectedDate})` : "";
 
     const message =
-      `*Velaan Bay — Consolidated Buyer Demand & Procurement Sheet*\n` +
+      `*Velaan Bay — Consolidated Buyer Demand & Procurement Sheet${dateTitle}*\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
-      `*Date:* ${new Date().toISOString().slice(0, 10)}\n` +
+      `*Target Delivery:* ${selectedDate !== "all" ? selectedDate : "All Available Dates"}\n` +
+      `*Date Generated:* ${new Date().toISOString().slice(0, 10)}\n` +
       `*Items Count:* ${targetPlans.length} products\n` +
       `*Total Consolidated Demand:* ${sumDemand.toLocaleString("en-IN")} kg\n` +
       `*Base Buyer Demand:* ${sumBase.toLocaleString("en-IN")} kg\n` +
@@ -886,15 +1008,16 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       `*Pending Market Buy:* ${sumBalance.toLocaleString("en-IN")} kg\n\n` +
       `*Product-wise Requirements:*\n${itemsText}\n\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
-      `_Purchase Managers & Drivers: Please purchase the pending quantities at Koyambedu Wholesale Mandi._`;
+      `_Purchase Managers & Drivers: Please purchase the pending quantities at Udumalaipet Wholesale Mandi._`;
 
     window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, "_blank", "noopener,noreferrer");
   };
 
-  // Export CSV with full Base + Extra Buffer breakdown
+  // Export CSV with full Base + Extra Buffer breakdown and Target Delivery Date
   const handleExportCsv = () => {
     const headers = [
       "Product",
+      "Target Delivery Date",
       "Buyers",
       "Base Demand (KG)",
       "Extra Buffer (KG)",
@@ -905,10 +1028,14 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       "Status",
     ];
     const rows = plans.map((p) => {
-      const buyersList = p.buyers.map((b) => `${b.buyer} (${b.baseQty}kg + ${b.extraKg}kg buffer)`).join("; ");
+      const dates = p.deliveryDates.length ? p.deliveryDates.join("; ") : (p.primaryDate || "Prompt");
+      const buyersList = p.buyers
+        .map((b) => `${b.buyer} (${formatKg2(b.baseQty)}kg + ${formatKg2(b.extraKg)}kg buffer · ${b.deliveryDate || b.date || "Prompt"})`)
+        .join("; ");
       const status = p.balance <= 0 ? (p.reserved > 0 ? "Planned" : "Fulfilled") : "Pending";
       return [
         `"${p.product}"`,
+        `"${dates}"`,
         `"${buyersList}"`,
         p.baseDemand,
         p.extraKg,
@@ -925,7 +1052,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.setAttribute("download", `Demand_Consolidation_Plan_${new Date().toISOString().slice(0, 10)}.csv`);
+    const dateSuffix = selectedDate !== "all" ? `_${selectedDate}` : "";
+    link.setAttribute("download", `Demand_Consolidation_Plan${dateSuffix}_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -933,16 +1061,59 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     toast.success("Demand Consolidation CSV exported successfully.");
   };
 
-  // Quick save buffer on a specific PO
+  // Quick save buffer on a specific product line of a PO (rounded to 2 decimal places)
+  const handleSavePoLineBuffer = (poId: string, product: string, targetLineBuffer: number) => {
+    const po = (data["purchase-orders"] ?? []).find((x) => x.id === poId);
+    if (!po) return;
+    const ls = parseLines(po["item"]);
+    const totalBase = ls.reduce((s, l) => s + (Number(l.q) || 0), 0);
+    const safeLineBuffer = Math.max(0, round2(targetLineBuffer));
+    const poExtra = Number(po["extraKg"]) || 0;
+
+    const updatedLines = ls.map((l) => {
+      const lineBase = Number(l.q) || 0;
+      const ratio = totalBase > 0 ? lineBase / totalBase : 1 / Math.max(1, ls.length);
+      const currentLineExtra = l.extraKg !== undefined ? Number(l.extraKg) : round2(poExtra * ratio);
+      if (l.p === product) {
+        return { ...l, extraKg: safeLineBuffer };
+      }
+      return { ...l, extraKg: currentLineExtra };
+    });
+
+    const newPoExtra = round2(updatedLines.reduce((sum, l) => sum + (Number(l.extraKg) || 0), 0));
+    const baseQty = ls.reduce((s, l) => s + (Number(l.q) || 0), 0);
+
+    const updatedPo = normalize("purchase-orders", {
+      ...po,
+      item: JSON.stringify(updatedLines),
+      extraKg: newPoExtra,
+      qty: round2(baseQty + newPoExtra),
+    });
+
+    const err = validateData({
+      ...data,
+      "purchase-orders": (data["purchase-orders"] ?? []).map((x) => (x.id === poId ? updatedPo : x)),
+    });
+    if (err) {
+      toast.error(err);
+      return;
+    }
+    upsert("purchase-orders", updatedPo);
+    toast.success(`${product} buffer in ${poId} set to +${formatKg2(safeLineBuffer)} kg.`);
+    setEditingPoBuffer(null);
+  };
+
+  // Quick save buffer on a specific PO (rounded to 2 decimal places)
   const handleSavePoBuffer = (poId: string, newBuffer: number) => {
     const po = (data["purchase-orders"] ?? []).find((x) => x.id === poId);
     if (!po) return;
     const ls = parseLines(po["item"]);
     const baseQty = ls.reduce((s, l) => s + (Number(l.q) || 0), 0);
+    const safeBuffer = Math.max(0, round2(newBuffer));
     const updatedPo = normalize("purchase-orders", {
       ...po,
-      extraKg: Math.max(0, newBuffer),
-      qty: round(baseQty + Math.max(0, newBuffer)),
+      extraKg: safeBuffer,
+      qty: round2(baseQty + safeBuffer),
     });
     const err = validateData({
       ...data,
@@ -953,24 +1124,27 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       return;
     }
     upsert("purchase-orders", updatedPo);
-    toast.success(`${poId} extra buffer updated to +${newBuffer} kg. Total demand recalculated.`);
+    toast.success(`${poId} extra buffer updated to +${formatKg2(safeBuffer)} kg.`);
     setEditingPoBuffer(null);
   };
 
-  // Quick +/- stepper on the consolidation table — adjusts a contributing PO's buffer.
-  // Increments land on the first PO; decrements target whichever PO currently holds
-  // the largest buffer so the button never no-ops on a zero-buffer PO.
+  // Quick +/- stepper on the consolidation table — adjusts buffer for the product.
   const handleAdjustProductBuffer = (plan: ProductPlan, delta: number) => {
+    const safeNewBuffer = Math.max(0, round2(plan.extraKg + delta));
+    handleSetProductBuffer(plan, safeNewBuffer);
+  };
+
+  // Direct input box handler for extra buffer on the consolidation table (rounded to 2 decimal places)
+  const handleSetProductBuffer = (plan: ProductPlan, newTotalBuffer: number) => {
+    const safeBuffer = Math.max(0, round2(newTotalBuffer));
     const poIds = Array.from(new Set(plan.buyers.flatMap((b) => b.pos)));
     const pos = poIds
       .map((id) => (data["purchase-orders"] ?? []).find((x) => x.id === id))
       .filter((x): x is Row => !!x);
-    const [first, ...rest] = pos;
+    const [first] = pos;
     if (!first) return;
-    const target =
-      delta < 0 ? rest.reduce((a, b) => ((Number(b["extraKg"]) || 0) > (Number(a["extraKg"]) || 0) ? b : a), first) : first;
-    const currentExtra = Number(target["extraKg"]) || 0;
-    handleSavePoBuffer(target.id, Math.max(0, round(currentExtra + delta)));
+
+    handleSavePoLineBuffer(first.id, plan.product, safeBuffer);
   };
 
   // All Transport Movements with enriched supplier, buyer & product details
@@ -986,7 +1160,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
       if (dir === "Inward" || dir === "Inward Return") {
         const trip = (data["trips"] ?? []).find((t) => t.id === refId);
-        partyName = String(trip?.["supplier"] || mov["supplier"] || "Koyambedu Wholesale Supplier");
+        partyName = String(trip?.["supplier"] || mov["supplier"] || "Udumalai Wholesale Supplier");
         partyRole = "Supplier";
         itemsList = trip ? parseLines(trip["item"]) : parseLines(mov["item"]);
         containerText = trip?.["containerCount"] ? `${trip["containerCount"]} ${trip["containerType"]}` : "";
@@ -1086,6 +1260,12 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, "_blank", "noopener,noreferrer");
   };
 
+  // Active product plan dynamically derived from reactive plans list
+  const activeProductPlan = useMemo(() => {
+    if (!selectedProduct) return null;
+    return plans.find((p) => p.product === selectedProduct.product) || selectedProduct;
+  }, [plans, selectedProduct]);
+
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       {/* Top Header */}
@@ -1123,11 +1303,12 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             <Package className="size-4 text-primary" />
           </div>
           <p className="mt-1 font-display text-2xl font-semibold text-foreground">
-            {totalDemand.toLocaleString("en-IN")}{" "}
+            {formatKg2(totalDemand)}{" "}
             <span className="text-sm font-normal text-muted-foreground">kg</span>
           </p>
           <p className="mt-1 text-[11px] text-muted-foreground">
-            {totalBaseDemand.toLocaleString("en-IN")} kg base + {totalExtraKg.toLocaleString("en-IN")} kg extra buffer
+            {formatKg2(totalBaseDemand)} kg base + {formatKg2(totalExtraKg)} kg extra buffer
+            {selectedDate !== "all" ? ` · Delivery: ${selectedDate}` : " · All dates"}
           </p>
         </div>
 
@@ -1142,7 +1323,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             </span>
           </div>
           <p className="mt-1 font-display text-2xl font-semibold text-amber-700 dark:text-amber-400">
-            +{totalExtraKg.toLocaleString("en-IN")}{" "}
+            +{formatKg2(totalExtraKg)}{" "}
             <span className="text-sm font-normal text-amber-800/80 dark:text-amber-300/80">kg</span>
           </p>
           <p className="mt-1 text-[11px] text-amber-900/80 dark:text-amber-300/80">
@@ -1158,11 +1339,11 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             <Truck className="size-4 text-emerald-600" />
           </div>
           <p className="mt-1 font-display text-2xl font-semibold text-primary">
-            {totalPurchased.toLocaleString("en-IN")}{" "}
+            {formatKg2(totalPurchased)}{" "}
             <span className="text-sm font-normal text-muted-foreground">kg</span>
           </p>
           <p className="mt-1 text-[11px] text-muted-foreground">
-            {totalReserved > 0 ? `${totalReserved} kg reserved in loading trips` : "Submitted market DC purchases"}
+            {totalReserved > 0 ? `${formatKg2(totalReserved)} kg reserved in loading trips` : "Submitted market DC purchases"}
           </p>
         </div>
 
@@ -1178,7 +1359,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
               totalBalance > 0 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"
             )}
           >
-            {totalBalance.toLocaleString("en-IN")}{" "}
+            {formatKg2(totalBalance)}{" "}
             <span className="text-sm font-normal text-muted-foreground">kg</span>
           </p>
           <p className="mt-1 text-[11px] text-muted-foreground">
@@ -1216,9 +1397,14 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 Active Demand Items ·{" "}
                 <span className="text-primary font-bold">
                   {totalBalance > 0
-                    ? `${totalBalance.toLocaleString("en-IN")} kg pending purchase`
-                    : `${totalDemand.toLocaleString("en-IN")} kg total demand`}
+                    ? `${formatKg2(totalBalance)} kg pending purchase`
+                    : `${formatKg2(totalDemand)} kg total demand`}
                 </span>
+                {selectedDate !== "all" && (
+                  <span className="ml-1.5 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-semibold text-primary">
+                    📅 {selectedDate}
+                  </span>
+                )}
                 <span className="text-muted-foreground ml-1.5 font-normal hidden sm:inline">
                   (select products or plan directly)
                 </span>
@@ -1290,6 +1476,112 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
           </div>
         </div>
 
+        {/* Date Wise Filter & View Mode Controls Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b p-3 bg-muted/15 text-xs">
+          {/* Date Selector Pills */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex items-center gap-1.5 font-semibold text-foreground mr-1 text-xs">
+              <Calendar className="size-4 text-primary" />
+              <span>Delivery Date:</span>
+            </div>
+
+            <button
+              onClick={() => setSelectedDate("all")}
+              className={cn(
+                "rounded-full px-3 py-1 font-medium transition-all text-xs flex items-center gap-1.5",
+                selectedDate === "all"
+                  ? "bg-primary text-primary-foreground font-semibold shadow-xs"
+                  : "border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+              )}
+            >
+              <span>All Dates</span>
+              <span
+                className={cn(
+                  "rounded-full px-1.5 py-0.2 text-[10px]",
+                  selectedDate === "all"
+                    ? "bg-primary-foreground/20 text-primary-foreground"
+                    : "bg-muted text-muted-foreground"
+                )}
+              >
+                {plans.length}
+              </span>
+            </button>
+
+            {availableDates.map((ad) => (
+              <button
+                key={ad.date}
+                onClick={() => setSelectedDate(ad.date)}
+                className={cn(
+                  "rounded-full px-3 py-1 font-medium transition-all text-xs flex items-center gap-1.5",
+                  selectedDate === ad.date
+                    ? "bg-primary text-primary-foreground font-semibold shadow-xs"
+                    : "border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"
+                )}
+              >
+                <span>{ad.date}</span>
+                <span
+                  className={cn(
+                    "rounded-full px-1.5 py-0.2 text-[10px]",
+                    selectedDate === ad.date
+                      ? "bg-primary-foreground/20 text-primary-foreground"
+                      : "bg-muted text-muted-foreground"
+                  )}
+                >
+                  {ad.count} {ad.count === 1 ? "PO" : "POs"} · {formatKg2(ad.totalKg)} kg
+                </span>
+              </button>
+            ))}
+
+            {/* Custom Date Input */}
+            <div className="flex items-center gap-1 ml-1">
+              <input
+                type="date"
+                value={selectedDate !== "all" ? selectedDate : ""}
+                onChange={(e) => setSelectedDate(e.target.value || "all")}
+                className="rounded-lg border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
+                title="Filter by custom date"
+              />
+              {selectedDate !== "all" && (
+                <button
+                  onClick={() => setSelectedDate("all")}
+                  className="text-muted-foreground hover:text-foreground text-xs px-1"
+                  title="Clear date filter"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* View Mode Switcher (Grouped Date-Wise vs Flat Consolidated) */}
+          <div className="flex items-center gap-1 rounded-lg border bg-card p-0.5 text-xs shadow-2xs">
+            <button
+              onClick={() => setViewMode("grouped")}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium transition-colors",
+                viewMode === "grouped"
+                  ? "bg-primary/10 text-primary font-semibold"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              title="Group products by target delivery date"
+            >
+              <Calendar className="size-3.5" /> Date-Wise Grouped
+            </button>
+            <button
+              onClick={() => setViewMode("consolidated")}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium transition-colors",
+                viewMode === "consolidated"
+                  ? "bg-primary/10 text-primary font-semibold"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              title="View all consolidated products in a single table"
+            >
+              <Package className="size-3.5" /> Consolidated
+            </button>
+          </div>
+        </div>
+
         {/* Table */}
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -1309,145 +1601,424 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   </button>
                 </th>
                 <th className="px-4 py-3 font-semibold">Product</th>
+                <th className="px-4 py-3 font-semibold">Target Delivery Date</th>
                 <th className="px-4 py-3 font-semibold">Buyer-Wise Demand Breakdown</th>
                 <th className="px-4 py-3 text-right font-semibold">Base Demand</th>
                 <th className="px-4 py-3 text-right font-semibold text-amber-700 dark:text-amber-400">
                   ➕ Extra Buffer
                 </th>
                 <th className="px-4 py-3 text-right font-semibold">Total Demand</th>
-                                                <th className="px-4 py-3 text-right font-semibold">Actions</th>
+                <th className="px-4 py-3 text-right font-semibold">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y">
-              {filteredPlans.map((p) => {
-                const isSelected = selectedProducts.has(p.product);
+              {viewMode === "grouped" && selectedDate === "all" ? (
+                dateGroups.map((g) => (
+                  <Fragment key={g.date}>
+                    <tr className="bg-muted/60 border-y border-border/80">
+                      <td colSpan={8} className="px-4 py-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="flex size-6 items-center justify-center rounded-md bg-primary text-primary-foreground font-bold text-xs">
+                              <Calendar className="size-3.5" />
+                            </span>
+                            <span className="font-bold text-foreground text-sm">
+                              {g.date === "Prompt" ? "Prompt / Same-Day Delivery" : `Delivery Date: ${g.date}`}
+                            </span>
+                            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary">
+                              {g.totalPos} Buyer {g.totalPos === 1 ? "PO" : "POs"}
+                            </span>
+                            <span className="text-xs text-muted-foreground">
+                              ({g.plans.length} {g.plans.length === 1 ? "product" : "products"})
+                            </span>
+                          </div>
 
-                return (
-                  <tr
-                    key={p.product}
-                    className={cn(
-                      "hover:bg-muted/20 transition-colors",
-                      isSelected && "bg-primary-soft/30"
-                    )}
-                  >
-                    {/* Checkbox */}
-                    <td className="px-3 py-3 text-center">
-                      <button
-                        onClick={() => handleToggleSelectProduct(p.product)}
-                        className="flex size-4 items-center justify-center rounded border border-muted-foreground/40 text-primary transition-colors hover:border-primary"
-                      >
-                        {isSelected ? (
-                          <CheckSquare className="size-3.5 fill-primary text-primary-foreground" />
-                        ) : (
-                          <Square className="size-3.5 text-muted-foreground" />
-                        )}
-                      </button>
-                    </td>
+                          <div className="flex items-center gap-4 text-xs font-medium">
+                            <span className="text-muted-foreground">
+                              Base: <span className="font-semibold text-foreground">{formatKg2(g.baseDemand)} kg</span>
+                            </span>
+                            {g.extraKg > 0 && (
+                              <span className="text-amber-800 dark:text-amber-300">
+                                Buffer: <span className="font-bold">+{formatKg2(g.extraKg)} kg</span>
+                              </span>
+                            )}
+                            <span className="text-primary font-bold">
+                              Total Demand: {formatKg2(g.demand)} kg
+                            </span>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                    {g.plans.map((p) => {
+                      const isSelected = selectedProducts.has(p.product);
+                      return (
+                        <tr
+                          key={`${g.date}-${p.product}`}
+                          className={cn(
+                            "hover:bg-muted/20 transition-colors",
+                            isSelected && "bg-primary-soft/30"
+                          )}
+                        >
+                          {/* Checkbox */}
+                          <td className="px-3 py-3 text-center">
+                            <button
+                              onClick={() => handleToggleSelectProduct(p.product)}
+                              className="flex size-4 items-center justify-center rounded border border-muted-foreground/40 text-primary transition-colors hover:border-primary"
+                            >
+                              {isSelected ? (
+                                <CheckSquare className="size-3.5 fill-primary text-primary-foreground" />
+                              ) : (
+                                <Square className="size-3.5 text-muted-foreground" />
+                              )}
+                            </button>
+                          </td>
 
-                    {/* Product Name */}
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <span className="size-2 rounded-full bg-primary" />
-                        <span className="font-semibold text-foreground">{p.product}</span>
-                      </div>
-                    </td>
+                          {/* Product Name */}
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <span className="size-2 rounded-full bg-primary" />
+                              <span className="font-semibold text-foreground">{p.product}</span>
+                            </div>
+                          </td>
 
-                    {/* Buyer-Wise Demand with clean badges */}
-                    <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-1.5">
-                        {p.buyers.map((b) => (
-                          <span
-                            key={b.buyer}
-                            title={`${b.pos.join(", ")} · Base: ${b.baseQty} kg${b.extraKg > 0 ? ` (+${b.extraKg} kg buffer)` : ""}`}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-primary/20 bg-primary/5 px-2 py-0.5 text-xs font-medium text-foreground"
+                          {/* Target Delivery Date */}
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <span className="inline-flex items-center gap-1 rounded bg-muted/80 px-2 py-0.5 font-mono text-[11px] font-medium text-foreground">
+                              <Calendar className="size-3 text-primary" />
+                              {g.date}
+                            </span>
+                          </td>
+
+                          {/* Buyer-Wise Demand with clean badges */}
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap gap-1.5">
+                              {p.buyers.map((b) => (
+                                <span
+                                  key={`${b.buyer}-${b.date}`}
+                                  title={`${b.pos.join(", ")} · Base: ${formatKg2(b.baseQty)} kg${b.extraKg > 0 ? ` (+${formatKg2(b.extraKg)} kg buffer)` : ""}${b.deliveryDate ? ` · Delivery: ${b.deliveryDate}` : ""}`}
+                                  className="inline-flex items-center gap-1.5 rounded-md border border-primary/20 bg-primary/5 px-2 py-0.5 text-xs font-medium text-foreground"
+                                >
+                                  <Users className="size-3 text-primary" />
+                                  <span>{b.buyer}</span>
+                                  <span className="font-semibold text-primary">· {formatKg2(b.baseQty)} kg</span>
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+
+                          {/* Base Demand */}
+                          <td className="px-4 py-3 text-right tabular-nums text-muted-foreground font-medium">
+                            {formatKg2(p.baseDemand)} kg
+                          </td>
+
+                          {/* Extra Buffer KG */}
+                          <td className="px-4 py-3">
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setBufferInputs((prev) => {
+                                    const copy = { ...prev };
+                                    delete copy[p.product];
+                                    return copy;
+                                  });
+                                  handleAdjustProductBuffer(p, -BUFFER_STEP);
+                                }}
+                                disabled={p.extraKg <= 0}
+                                title={`Decrease buffer by ${BUFFER_STEP} kg`}
+                                className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-30 dark:text-amber-400"
+                              >
+                                <Minus className="size-3" />
+                              </button>
+
+                              <div className="flex items-center">
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min="0"
+                                  placeholder="0"
+                                  value={
+                                    bufferInputs[p.product] !== undefined
+                                      ? bufferInputs[p.product]
+                                      : p.extraKg > 0
+                                      ? String(round2(p.extraKg))
+                                      : ""
+                                  }
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setBufferInputs((prev) => ({ ...prev, [p.product]: val }));
+                                  }}
+                                  onBlur={() => {
+                                    if (bufferInputs[p.product] !== undefined) {
+                                      const parsed = parseFloat(bufferInputs[p.product]);
+                                      handleSetProductBuffer(p, isNaN(parsed) ? 0 : parsed);
+                                      setBufferInputs((prev) => {
+                                        const copy = { ...prev };
+                                        delete copy[p.product];
+                                        return copy;
+                                      });
+                                    }
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      (e.target as HTMLInputElement).blur();
+                                    }
+                                  }}
+                                  className={cn(
+                                    "w-20 h-7 rounded border px-1.5 text-right font-mono text-xs font-bold transition-all outline-none focus:ring-1",
+                                    p.extraKg > 0
+                                      ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 focus:ring-amber-500"
+                                      : "border-border bg-background text-muted-foreground focus:ring-primary"
+                                  )}
+                                  title={`Extra buffer for ${p.product} in KG (rounded to 2 decimal places)`}
+                                />
+                                <span className="ml-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+                                  kg
+                                </span>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setBufferInputs((prev) => {
+                                    const copy = { ...prev };
+                                    delete copy[p.product];
+                                    return copy;
+                                  });
+                                  handleAdjustProductBuffer(p, BUFFER_STEP);
+                                }}
+                                title={`Increase buffer by ${BUFFER_STEP} kg`}
+                                className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
+                              >
+                                <Plus className="size-3" />
+                              </button>
+                            </div>
+                          </td>
+
+                          {/* Total Demand */}
+                          <td className="px-4 py-3 text-right tabular-nums">
+                            <span className="font-bold text-foreground text-sm block">
+                              {formatKg2(p.demand)} kg
+                            </span>
+                          </td>
+
+                          {/* Action Buttons */}
+                          <td className="px-4 py-3 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setSelectedProduct(p)}
+                                className="h-8 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+                                title="Edit buyers, PO breakdown & buffer"
+                              >
+                                <Pencil className="size-3.5 mr-1" /> Edit
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </Fragment>
+                ))
+              ) : (
+                filteredPlans.map((p) => {
+                  const isSelected = selectedProducts.has(p.product);
+                  return (
+                    <tr
+                      key={p.product}
+                      className={cn(
+                        "hover:bg-muted/20 transition-colors",
+                        isSelected && "bg-primary-soft/30"
+                      )}
+                    >
+                      {/* Checkbox */}
+                      <td className="px-3 py-3 text-center">
+                        <button
+                          onClick={() => handleToggleSelectProduct(p.product)}
+                          className="flex size-4 items-center justify-center rounded border border-muted-foreground/40 text-primary transition-colors hover:border-primary"
+                        >
+                          {isSelected ? (
+                            <CheckSquare className="size-3.5 fill-primary text-primary-foreground" />
+                          ) : (
+                            <Square className="size-3.5 text-muted-foreground" />
+                          )}
+                        </button>
+                      </td>
+
+                      {/* Product Name */}
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="size-2 rounded-full bg-primary" />
+                          <span className="font-semibold text-foreground">{p.product}</span>
+                        </div>
+                      </td>
+
+                      {/* Target Delivery Date */}
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <div className="flex flex-wrap items-center gap-1">
+                          {p.deliveryDates.length > 0 ? (
+                            p.deliveryDates.map((d) => (
+                              <span
+                                key={d}
+                                className="inline-flex items-center gap-1 rounded bg-muted/80 px-2 py-0.5 font-mono text-[11px] font-medium text-foreground"
+                              >
+                                <Calendar className="size-3 text-primary" />
+                                {d}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded bg-muted/60 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
+                              <Calendar className="size-3 text-muted-foreground" />
+                              {p.primaryDate || "Prompt"}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      {/* Buyer-Wise Demand with clean badges */}
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap gap-1.5">
+                          {p.buyers.map((b) => (
+                            <span
+                              key={`${b.buyer}-${b.date}`}
+                              title={`${b.pos.join(", ")} · Base: ${formatKg2(b.baseQty)} kg${b.extraKg > 0 ? ` (+${formatKg2(b.extraKg)} kg buffer)` : ""}${b.deliveryDate ? ` · Delivery: ${b.deliveryDate}` : ""}`}
+                              className="inline-flex items-center gap-1.5 rounded-md border border-primary/20 bg-primary/5 px-2 py-0.5 text-xs font-medium text-foreground"
+                            >
+                              <Users className="size-3 text-primary" />
+                              <span>{b.buyer}</span>
+                              <span className="font-semibold text-primary">· {formatKg2(b.baseQty)} kg</span>
+                              {b.deliveryDate && (
+                                <span className="text-[10px] text-muted-foreground font-mono">
+                                  ({b.deliveryDate})
+                                </span>
+                              )}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+
+                      {/* Base Demand */}
+                      <td className="px-4 py-3 text-right tabular-nums text-muted-foreground font-medium">
+                        {formatKg2(p.baseDemand)} kg
+                      </td>
+
+                      {/* Extra Buffer KG */}
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBufferInputs((prev) => {
+                                const copy = { ...prev };
+                                delete copy[p.product];
+                                return copy;
+                              });
+                              handleAdjustProductBuffer(p, -BUFFER_STEP);
+                            }}
+                            disabled={p.extraKg <= 0}
+                            title={`Decrease buffer by ${BUFFER_STEP} kg`}
+                            className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-30 dark:text-amber-400"
                           >
-                            <Users className="size-3 text-primary" />
-                            <span>{b.buyer}</span>
-                            <span className="font-semibold text-primary">· {b.baseQty.toLocaleString("en-IN")} kg</span>
-                          </span>
-                        ))}
-                      </div>
-                    </td>
+                            <Minus className="size-3" />
+                          </button>
 
-                    {/* Base Demand */}
-                    <td className="px-4 py-3 text-right tabular-nums text-muted-foreground font-medium">
-                      {p.baseDemand.toLocaleString("en-IN")} kg
-                    </td>
+                          <div className="flex items-center">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              placeholder="0"
+                              value={
+                                bufferInputs[p.product] !== undefined
+                                  ? bufferInputs[p.product]
+                                  : p.extraKg > 0
+                                  ? String(round2(p.extraKg))
+                                  : ""
+                              }
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setBufferInputs((prev) => ({ ...prev, [p.product]: val }));
+                              }}
+                              onBlur={() => {
+                                if (bufferInputs[p.product] !== undefined) {
+                                  const parsed = parseFloat(bufferInputs[p.product]);
+                                  handleSetProductBuffer(p, isNaN(parsed) ? 0 : parsed);
+                                  setBufferInputs((prev) => {
+                                    const copy = { ...prev };
+                                    delete copy[p.product];
+                                    return copy;
+                                  });
+                                }
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  (e.target as HTMLInputElement).blur();
+                                }
+                              }}
+                              className={cn(
+                                "w-20 h-7 rounded border px-1.5 text-right font-mono text-xs font-bold transition-all outline-none focus:ring-1",
+                                p.extraKg > 0
+                                  ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 focus:ring-amber-500"
+                                  : "border-border bg-background text-muted-foreground focus:ring-primary"
+                              )}
+                              title={`Extra buffer for ${p.product} in KG (rounded to 2 decimal places)`}
+                            />
+                            <span className="ml-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+                              kg
+                            </span>
+                          </div>
 
-                    {/* Extra Buffer KG — inline increment/decrement */}
-                    <td className="px-4 py-3">
-                      <div className="flex items-center justify-end gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => handleAdjustProductBuffer(p, -BUFFER_STEP)}
-                          disabled={p.extraKg <= 0}
-                          title={`Decrease buffer by ${BUFFER_STEP} kg`}
-                          className="flex size-6 shrink-0 items-center justify-center rounded-md border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-40 dark:text-amber-400"
-                        >
-                          <Minus className="size-3" />
-                        </button>
-                        <span
-                          className={cn(
-                            "min-w-16 text-center text-xs font-semibold tabular-nums",
-                            p.extraKg > 0 ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"
-                          )}
-                        >
-                          {p.extraKg > 0 ? `+${p.extraKg.toLocaleString("en-IN")} kg` : "— kg"}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBufferInputs((prev) => {
+                                const copy = { ...prev };
+                                delete copy[p.product];
+                                return copy;
+                              });
+                              handleAdjustProductBuffer(p, BUFFER_STEP);
+                            }}
+                            title={`Increase buffer by ${BUFFER_STEP} kg`}
+                            className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
+                          >
+                            <Plus className="size-3" />
+                          </button>
+                        </div>
+                      </td>
+
+                      {/* Total Demand */}
+                      <td className="px-4 py-3 text-right tabular-nums">
+                        <span className="font-bold text-foreground text-sm block">
+                          {formatKg2(p.demand)} kg
                         </span>
-                        <button
-                          type="button"
-                          onClick={() => handleAdjustProductBuffer(p, BUFFER_STEP)}
-                          title={`Increase buffer by ${BUFFER_STEP} kg`}
-                          className="flex size-6 shrink-0 items-center justify-center rounded-md border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
-                        >
-                          <Plus className="size-3" />
-                        </button>
-                      </div>
-                    </td>
+                      </td>
 
-                    {/* Total Demand */}
-                    <td className="px-4 py-3 text-right tabular-nums">
-                      <span className="font-bold text-foreground text-sm block">
-                        {p.demand.toLocaleString("en-IN")} kg
-                      </span>
-                    </td>
-
-
-                    {/* Action Buttons */}
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setSelectedProduct(p)}
-                          className="h-8 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
-                          title="Edit buyers, PO breakdown & buffer"
-                        >
-                          <Pencil className="size-3.5 mr-1" /> Edit
-                        </Button>
-                        {/* Plan trip button commented out as requested */}
-                        {/* <Button
-                          onClick={() => openPlanTripModal([p], "Inward")}
-                          size="sm"
-                          className={cn(
-                            "h-8 inline-flex items-center gap-1.5 rounded-lg px-3 text-xs font-semibold shadow-2xs transition-all",
-                            p.balance > 0
-                              ? "bg-primary text-primary-foreground hover:opacity-90"
-                              : "border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20"
-                          )}
-                        >
-                          <ShoppingCart className="size-3.5" /> Plan trip
-                        </Button> */}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+                      {/* Action Buttons */}
+                      <td className="px-4 py-3 text-right">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setSelectedProduct(p)}
+                            className="h-8 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+                            title="Edit buyers, PO breakdown & buffer"
+                          >
+                            <Pencil className="size-3.5 mr-1" /> Edit
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
 
               {!filteredPlans.length && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-muted-foreground">
-                    {search ? `No products match "${search}".` : "No buyer demand found. Add buyer purchase orders first."}
+                  <td colSpan={8} className="px-4 py-12 text-center text-muted-foreground">
+                    {search || selectedDate !== "all"
+                      ? `No products match the selected date "${selectedDate}" or search "${search}".`
+                      : "No buyer demand found. Add buyer purchase orders first."}
                   </td>
                 </tr>
               )}
@@ -1819,7 +2390,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   type="button"
                   onClick={() => {
                     setTripDirection("Inward");
-                    setTripFromLocation("Koyambedu Wholesale Mandi (Supplier Stall)");
+                    setTripFromLocation("Udumalaipet Wholesale Mandi (Supplier Stall)");
                     setTripToLocation("Velaan Bay Warehouse (Receiving Bay)");
                     setTripManagerName("Suresh Kumar (Purchase Manager)");
                     setTripManagerPhone("9840234567");
@@ -1838,7 +2409,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   onClick={() => {
                     setTripDirection("Inward Return");
                     setTripFromLocation("Velaan Bay Warehouse (Receiving Bay)");
-                    setTripToLocation("Koyambedu Wholesale Mandi (Supplier Stall)");
+                    setTripToLocation("Udumalaipet Wholesale Mandi (Supplier Stall)");
                     setTripManagerName("Karthik (Fleet & Bay Manager)");
                     setTripManagerPhone("9840234567");
                     if (!returnItems.length) {
@@ -2064,7 +2635,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                         type="text"
                         value={tripToLocation}
                         onChange={(e) => setTripToLocation(e.target.value)}
-                        placeholder="e.g. Koyambedu Wholesale Mandi (Supplier Stall)"
+                        placeholder="e.g. Udumalaipet Wholesale Mandi (Supplier Stall)"
                         className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-medium outline-none focus:ring-1 focus:ring-primary"
                       />
                       <span className="text-[11px] text-muted-foreground mt-0.5 block">
@@ -2321,9 +2892,9 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                           <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">
                             Avg ₹{tripAvgRate}/kg
                           </td> */}
-                          <td className="px-3 py-2 text-right font-bold text-foreground tabular-nums">
+                          {/* <td className="px-3 py-2 text-right font-bold text-foreground tabular-nums">
                             ₹{tripTotalAmount.toLocaleString("en-IN")}
-                          </td>
+                          </td> */}
                           <td></td>
                         </tr>
                       </tfoot>
@@ -2401,7 +2972,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                         type="text"
                         value={tripFromLocation}
                         onChange={(e) => setTripFromLocation(e.target.value)}
-                        placeholder="e.g. Koyambedu Wholesale Mandi (Supplier Stall)"
+                        placeholder="e.g. Udumalaipet Wholesale Mandi (Supplier Stall)"
                         className="w-full rounded-lg border bg-background px-3 py-2 text-xs font-medium outline-none focus:border-primary"
                       />
                       <span className="text-[11px] text-muted-foreground mt-0.5 block">
@@ -2564,18 +3135,26 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       )}
 
       {/* Product Demand Breakdown & PO Buffer Adjustment Modal */}
-      {selectedProduct && (
+      {selectedProduct && activeProductPlan && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="fixed inset-0 bg-foreground/40 backdrop-blur-xs" onClick={() => setSelectedProduct(null)} />
-          <div className="relative w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl bg-card p-6 shadow-2xl border animate-in zoom-in-95 space-y-4">
+          <div className="relative w-full max-w-3xl max-h-[90vh] overflow-y-auto rounded-2xl bg-card p-6 shadow-2xl border animate-in zoom-in-95 space-y-4">
             <div className="flex items-start justify-between border-b pb-4">
               <div>
-                <span className="rounded-md bg-primary/10 px-2 py-0.5 font-mono text-xs font-bold text-primary">
-                  Demand Breakdown & Buffer Control
-                </span>
-                <h2 className="mt-1 text-xl font-bold text-foreground">{selectedProduct.product}</h2>
+                <div className="flex items-center gap-2">
+                  <span className="rounded-md bg-primary/10 px-2 py-0.5 font-mono text-xs font-bold text-primary">
+                    Demand Breakdown & Buffer Control
+                  </span>
+                  {activeProductPlan.deliveryDates.length > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 font-mono text-[11px] font-medium text-foreground">
+                      <Calendar className="size-3 text-primary" />
+                      Delivery: {activeProductPlan.deliveryDates.join(", ")}
+                    </span>
+                  )}
+                </div>
+                <h2 className="mt-1 text-xl font-bold text-foreground">{activeProductPlan.product}</h2>
                 <p className="text-xs text-muted-foreground">
-                  Consolidated buyer purchase orders, base demand, and extra KG buffer allocation.
+                  Consolidated buyer purchase orders, delivery schedule, and extra KG buffer allocation.
                 </p>
               </div>
               <Button
@@ -2593,7 +3172,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
               <div>
                 <span className="text-muted-foreground block text-[11px]">Base Demand</span>
                 <span className="font-bold text-foreground text-sm mt-0.5 block">
-                  {selectedProduct.baseDemand.toLocaleString("en-IN")} kg
+                  {formatKg2(activeProductPlan.baseDemand)} kg
                 </span>
               </div>
               <div>
@@ -2601,19 +3180,19 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   <ShieldAlert className="size-3 text-amber-600" /> Extra Buffer
                 </span>
                 <span className="font-bold text-amber-700 dark:text-amber-400 text-sm mt-0.5 block">
-                  +{selectedProduct.extraKg.toLocaleString("en-IN")} kg
+                  +{formatKg2(activeProductPlan.extraKg)} kg
                 </span>
               </div>
               <div>
                 <span className="text-muted-foreground block text-[11px]">Total Consolidated</span>
                 <span className="font-bold text-primary text-sm mt-0.5 block">
-                  {selectedProduct.demand.toLocaleString("en-IN")} kg
+                  {formatKg2(activeProductPlan.demand)} kg
                 </span>
               </div>
               <div>
                 <span className="text-muted-foreground block text-[11px]">Purchased</span>
                 <span className="font-bold text-emerald-600 dark:text-emerald-400 text-sm mt-0.5 block">
-                  {selectedProduct.purchased.toLocaleString("en-IN")} kg
+                  {formatKg2(activeProductPlan.purchased)} kg
                 </span>
               </div>
             </div>
@@ -2621,13 +3200,15 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             {/* Contributing Buyer Purchase Orders Table */}
             <div className="space-y-2">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Contributing Buyer Orders ({selectedProduct.buyers.reduce((a, b) => a + b.pos.length, 0)} POs)
+                Contributing Buyer Orders ({activeProductPlan.buyers.reduce((a, b) => a + b.pos.length, 0)} POs)
               </h3>
               <div className="overflow-x-auto rounded-xl border">
                 <table className="w-full text-xs">
                   <thead className="bg-muted/60 text-muted-foreground font-semibold">
                     <tr>
                       <th className="px-3 py-2 text-left">PO Reference</th>
+                      <th className="px-3 py-2 text-left">Order Date</th>
+                      <th className="px-3 py-2 text-left">Delivery Date</th>
                       <th className="px-3 py-2 text-left">Buyer Name</th>
                       <th className="px-3 py-2 text-right">Base KG</th>
                       <th className="px-3 py-2 text-right text-amber-700 dark:text-amber-400">Extra Buffer</th>
@@ -2636,38 +3217,52 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                     </tr>
                   </thead>
                   <tbody className="divide-y">
-                    {selectedProduct.buyers.flatMap((b) =>
+                    {activeProductPlan.buyers.flatMap((b) =>
                       b.pos.map((poId) => {
                         const po = (data["purchase-orders"] ?? []).find((x) => x.id === poId);
+                        const poOrderDate = String(po?.["date"] || "—").trim();
+                        const poDeliveryDate = String(po?.["deliveryDate"] || "Prompt").trim();
                         const lines = po ? parseLines(po["item"]) : [];
-                        const line = lines.find((l) => l.p === selectedProduct.product);
+                        const line = lines.find((l) => l.p === activeProductPlan.product);
                         const totalBase = lines.reduce((s, x) => s + (Number(x.q) || 0), 0);
                         const lineBase = line ? Number(line.q) || 0 : 0;
                         const poExtra = Number(po?.["extraKg"]) || 0;
                         const ratio = totalBase > 0 ? lineBase / totalBase : 1 / Math.max(1, lines.length);
-                        const lineExtra = poExtra > 0 ? round(poExtra * ratio) : 0;
-                        const lineTotal = round(lineBase + lineExtra);
+                        const lineExtra =
+                          line?.extraKg !== undefined
+                            ? round2(Number(line.extraKg))
+                            : poExtra > 0
+                            ? round2(poExtra * ratio)
+                            : 0;
+                        const lineTotal = round2(lineBase + lineExtra);
 
                         const isEditing = editingPoBuffer?.poId === poId;
 
                         return (
                           <tr key={poId} className="hover:bg-muted/20">
                             <td className="px-3 py-2.5 font-mono font-bold text-primary">{poId}</td>
+                            <td className="px-3 py-2.5 font-mono text-muted-foreground whitespace-nowrap">{poOrderDate}</td>
+                            <td className="px-3 py-2.5 whitespace-nowrap">
+                              <span className="inline-flex items-center gap-1 rounded bg-muted/80 px-2 py-0.5 font-mono text-[11px] font-medium text-foreground">
+                                <Calendar className="size-3 text-primary" />
+                                {poDeliveryDate}
+                              </span>
+                            </td>
                             <td className="px-3 py-2.5 font-medium text-foreground">{b.buyer}</td>
                             <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground font-medium">
-                              {lineBase} kg
+                              {formatKg2(lineBase)} kg
                             </td>
                             <td className="px-3 py-2.5 text-right tabular-nums">
                               {lineExtra > 0 ? (
                                 <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1.5 py-0.5 font-bold text-amber-800 dark:text-amber-300">
-                                  +{lineExtra} kg
+                                  +{formatKg2(lineExtra)} kg
                                 </span>
                               ) : (
                                 <span className="text-muted-foreground">—</span>
                               )}
                             </td>
                             <td className="px-3 py-2.5 text-right tabular-nums font-bold text-foreground">
-                              {lineTotal} kg
+                              {formatKg2(lineTotal)} kg
                             </td>
                             <td className="px-3 py-2.5 text-center">
                               {isEditing ? (
@@ -2675,8 +3270,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                                   <input
                                     type="number"
                                     min="0"
-                                    step="any"
-                                    defaultValue={poExtra}
+                                    step="0.01"
+                                    defaultValue={lineExtra}
                                     id={`po-buffer-input-${poId}`}
                                     className="w-16 rounded border border-amber-500/40 bg-background px-1.5 py-0.5 text-right text-xs font-bold outline-none"
                                   />
@@ -2688,7 +3283,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                                         `po-buffer-input-${poId}`
                                       ) as HTMLInputElement;
                                       const val = Number(input?.value) || 0;
-                                      handleSavePoBuffer(poId, val);
+                                      handleSavePoLineBuffer(poId, activeProductPlan.product, val);
                                     }}
                                   >
                                     Save
@@ -2706,10 +3301,10 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                                 <Button
                                   variant="outline"
                                   size="sm"
-                                  onClick={() => setEditingPoBuffer({ poId, buffer: poExtra })}
+                                  onClick={() => setEditingPoBuffer({ poId, buffer: lineExtra })}
                                   className="h-6 px-2 text-[11px] rounded-md border-amber-500/30 text-amber-800 dark:text-amber-300 hover:bg-amber-500/10"
                                 >
-                                  {poExtra > 0 ? `Edit (+${poExtra}kg)` : "+ Add Buffer"}
+                                  {lineExtra > 0 ? `Edit (+${formatKg2(lineExtra)}kg)` : "+ Add Buffer"}
                                 </Button>
                               )}
                             </td>
@@ -2720,17 +3315,17 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   </tbody>
                   <tfoot className="bg-muted/40 font-semibold text-xs border-t">
                     <tr>
-                      <td colSpan={2} className="px-3 py-2 text-foreground font-bold">
-                        Consolidated Demand for {selectedProduct.product}
+                      <td colSpan={4} className="px-3 py-2 text-foreground font-bold">
+                        Consolidated Demand for {activeProductPlan.product}
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                        {selectedProduct.baseDemand} kg
+                        {formatKg2(activeProductPlan.baseDemand)} kg
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums text-amber-700 dark:text-amber-400 font-bold">
-                        +{selectedProduct.extraKg} kg
+                        +{formatKg2(activeProductPlan.extraKg)} kg
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums text-primary font-bold">
-                        {selectedProduct.demand} kg
+                        {formatKg2(activeProductPlan.demand)} kg
                       </td>
                       <td className="px-3 py-2" />
                     </tr>
@@ -2746,17 +3341,17 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 size="sm"
                 onClick={() => {
                   const spec =
-                    catalog?.find((x) => x.name.toLowerCase() === selectedProduct.product.toLowerCase()) ||
-                    PRODUCT_CATALOG.find((x) => x.name.toLowerCase() === selectedProduct.product.toLowerCase()) ||
+                    catalog?.find((x) => x.name.toLowerCase() === activeProductPlan.product.toLowerCase()) ||
+                    PRODUCT_CATALOG.find((x) => x.name.toLowerCase() === activeProductPlan.product.toLowerCase()) ||
                     { defaultPackSize: "1 kg" };
-                  const buyersText = selectedProduct.buyers
-                    .map((b) => `• ${b.buyer}: ${b.baseQty} kg${b.extraKg > 0 ? ` (+${b.extraKg} kg buffer)` : ""}`)
+                  const buyersText = activeProductPlan.buyers
+                    .map((b) => `• ${b.buyer}: ${formatKg2(b.baseQty)} kg${b.extraKg > 0 ? ` (+${formatKg2(b.extraKg)} kg buffer)` : ""}`)
                     .join("\n");
                   const msg =
                     `*Velaan Bay — Product Procurement Requirement*\n` +
-                    `*Product:* ${selectedProduct.product} (${spec.defaultPackSize})\n` +
-                    `*Total Demand:* ${selectedProduct.demand} kg (Base: ${selectedProduct.baseDemand} kg + Buffer: ${selectedProduct.extraKg} kg)\n` +
-                    `*Purchased:* ${selectedProduct.purchased} kg\n\n` +
+                    `*Product:* ${activeProductPlan.product} (${spec.defaultPackSize})\n` +
+                    `*Total Demand:* ${formatKg2(activeProductPlan.demand)} kg (Base: ${formatKg2(activeProductPlan.baseDemand)} kg + Buffer: ${formatKg2(activeProductPlan.extraKg)} kg)\n` +
+                    `*Purchased:* ${formatKg2(activeProductPlan.purchased)} kg\n\n` +
                     `*Buyer Demand Breakdown:*\n${buyersText}\n\n` +
                     `_Please procure balance produce at market._`;
                   window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank", "noopener,noreferrer");
@@ -2773,7 +3368,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 <Button
                   size="sm"
                   onClick={() => {
-                    const targetProduct = selectedProduct;
+                    const targetProduct = activeProductPlan;
                     setSelectedProduct(null);
                     openPlanTripModal([targetProduct], "Inward");
                   }}

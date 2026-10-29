@@ -92,7 +92,7 @@ export const STAGE_DEFINITIONS: Record<string, StageDefinition> = {
     shortName: "Mandi Sourcing",
     defaultSlug: "trips",
     flows: "F03 · F04 · F05",
-    description: "Fleet vehicle sent to Koyambedu market. Units, gross & tare weights recorded; 3 signatures collected; supplier price confirmed in Market Trader.",
+    description: "Fleet vehicle sent to Udumalaipet market. Units, gross & tare weights recorded; 3 signatures collected; supplier price confirmed in Market Trader.",
     badgeBg: "bg-blue-500/15",
     badgeText: "text-blue-800 dark:text-blue-400",
     accentBg: "from-blue-500/10 via-card to-background",

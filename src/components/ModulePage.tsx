@@ -22,6 +22,7 @@ import { BuyerDemandModal } from "./BuyerDemandModal";
 import { ReturnContainerModal } from "./ReturnContainerModal";
 import { ContainerReturnChallanModal } from "./ContainerReturnChallanModal";
 import { ProductCatalogModal } from "./ProductCatalogModal";
+import { WarehouseReceiptDialog } from "./WarehouseReceiptDialog";
 import { StatusBadge } from "./StatusBadge";
 import { cn } from "@/lib/utils";
 import { outstandingDemand } from "@/lib/sourcing";
@@ -596,7 +597,24 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
         <div className="border-t px-4 py-2.5 text-xs text-muted-foreground">Showing {filtered.length} of {rows.length} records</div>
       </div>
 
-      {editing && <FormDialog mod={mod} row={editing} onClose={() => setEditing(null)} onSave={save} isNew={!rows.some((x) => x.id === editing.id)} />}
+      {editing && (
+        mod.slug === "receipts" ? (
+          <WarehouseReceiptDialog
+            row={editing}
+            onClose={() => setEditing(null)}
+            onSave={save}
+            isNew={!rows.some((x) => x.id === editing.id)}
+          />
+        ) : (
+          <FormDialog
+            mod={mod}
+            row={editing}
+            onClose={() => setEditing(null)}
+            onSave={save}
+            isNew={!rows.some((x) => x.id === editing.id)}
+          />
+        )
+      )}
       {view && (
         <DetailPanel
           mod={mod}
@@ -1809,34 +1827,177 @@ function BuysEditor({ products, suppliers, value, onChange, need, priceEditable 
   const containerTotal = buys.reduce((a, b) => a + (b.cc || 0), 0);
   const CONTAINER_TYPES = ["Plastic crates", "Wooden boxes", "Gunny bags", "Carton boxes"];
   const amount = buys.reduce((a, b) => a + b.q * b.r, 0);
+  const avgRate = kgTotal > 0 ? Math.round((amount / kgTotal) * 100) / 100 : 0;
+  const commonSupplier = buys.length > 0 && buys.every((b) => b.s === buys[0].s && b.s) ? buys[0].s : (buys.find(b => b.s)?.s || suppliers[0] || "");
+
   return (
     <div className="space-y-3 rounded-xl border bg-muted/30 p-3">
       {!suppliers.length && <p className="text-xs text-destructive">Add suppliers in the Suppliers module first.</p>}
+
+      {/* Common Supplier Selector */}
+      {suppliers.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-lg border bg-card p-2.5 shadow-2xs">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-foreground">Common Supplier:</span>
+            <select
+              aria-label="Common Supplier"
+              className="rounded-md border bg-background px-2.5 py-1 text-xs font-medium outline-none focus:ring-1 focus:ring-primary"
+              value={commonSupplier}
+              onChange={(e) => {
+                const s = e.target.value;
+                emit(buys.map((b) => ({ ...b, s })));
+              }}
+            >
+              <option value="">Select Common Supplier</option>
+              {suppliers.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+            <span className="text-[11px] text-muted-foreground hidden sm:inline">
+              (Sets supplier for all purchase lines)
+            </span>
+          </div>
+          {commonSupplier && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => emit(buys.map((b) => ({ ...b, s: commonSupplier })))}
+              className="h-7 text-[11px] px-2 text-primary hover:bg-primary/10"
+            >
+              Apply to all lines
+            </Button>
+          )}
+        </div>
+      )}
+
       {buys.length > 0 && (
         <div className="overflow-x-auto rounded-lg border bg-card">
           <table className="w-full text-sm">
             <thead className="bg-muted/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-              <tr><th className="px-2 py-2">Supplier</th><th className="px-2 py-2">Product</th><th className="px-2 py-2">KG</th><th className="px-2 py-2">Price / KG</th><th className="px-2 py-2">Container</th><th className="px-2 py-2">Containers</th><th className="px-2 py-2 text-right">Amount</th><th /></tr>
+              <tr>
+                <th className="px-2 py-2">Supplier</th>
+                <th className="px-2 py-2">Product</th>
+                <th className="px-2 py-2">KG</th>
+                <th className="px-2 py-2">Avg price / KG</th>
+                <th className="px-2 py-2">Container</th>
+                <th className="px-2 py-2">Container Qty</th>
+                <th className="px-2 py-2 text-right">Amount</th>
+                <th />
+              </tr>
             </thead>
             <tbody>
               {buys.map((b, i) => (
                 <tr key={i} className="border-t">
-                  <td className="p-1.5"><select aria-label="Supplier" className={cell} value={b.s} onChange={(e) => patch(i, { s: e.target.value })}><option value="">Select</option>{suppliers.map((s) => <option key={s}>{s}</option>)}</select></td>
-                  <td className="p-1.5"><select aria-label="Product" className={cell} value={b.p} onChange={(e) => patch(i, { p: e.target.value, ...(b.q ? {} : { q: left(e.target.value, i) }) })}><option value="">Select</option>{products.map((p) => <option key={p} value={p}>{p}</option>)}</select>{b.p && need[b.p] && <p className="mt-0.5 text-[10px] text-muted-foreground">Demand {need[b.p]!.demand} kg</p>}</td>
-                  <td className="p-1.5"><input aria-label="KG" type="number" min="0" step="any" className={cn(cell, "w-20")} value={b.q} onChange={(e) => patch(i, { q: Number(e.target.value) })} /></td>
-                  <td className="p-1.5"><input aria-label="Price per KG" type="number" min="0" step="any" disabled={!priceEditable} title={!priceEditable ? "Purchase price entered by back office only" : undefined} className={cn(cell, "w-20 disabled:bg-muted disabled:text-muted-foreground")} value={b.r || ""} onChange={(e) => patch(i, { r: Number(e.target.value) })} /></td>
-                  <td className="p-1.5"><select aria-label="Container type" className={cell} value={b.ct || ""} onChange={(e) => patch(i, { ct: e.target.value })}><option value="">Select</option>{CONTAINER_TYPES.map((c) => <option key={c} value={c}>{c}</option>)}</select></td>
-                  <td className="p-1.5"><input aria-label="Containers" type="number" min="0" step="1" className={cn(cell, "w-20")} value={b.cc || ""} onChange={(e) => patch(i, { cc: Number(e.target.value) })} /></td>
+                  <td className="p-1.5">
+                    <select
+                      aria-label="Supplier"
+                      className={cell}
+                      value={b.s || commonSupplier}
+                      onChange={(e) => patch(i, { s: e.target.value })}
+                    >
+                      <option value="">Select</option>
+                      {suppliers.map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </td>
+                  <td className="p-1.5">
+                    <select
+                      aria-label="Product"
+                      className={cell}
+                      value={b.p}
+                      onChange={(e) => patch(i, { p: e.target.value, ...(b.q ? {} : { q: left(e.target.value, i) }) })}
+                    >
+                      <option value="">Select</option>
+                      {products.map((p) => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                    {b.p && need[b.p] && <p className="mt-0.5 text-[10px] text-muted-foreground">Demand {need[b.p]!.demand} kg</p>}
+                  </td>
+                  <td className="p-1.5">
+                    <input
+                      aria-label="KG"
+                      type="number"
+                      min="0"
+                      step="any"
+                      className={cn(cell, "w-20")}
+                      value={b.q || ""}
+                      onChange={(e) => patch(i, { q: Number(e.target.value) })}
+                      placeholder="0"
+                    />
+                  </td>
+                  <td className="p-1.5">
+                    <input
+                      aria-label="Avg price per KG"
+                      type="number"
+                      min="0"
+                      step="any"
+                      disabled={!priceEditable}
+                      title={!priceEditable ? "Purchase price entered by back office only" : undefined}
+                      className={cn(cell, "w-20 disabled:bg-muted disabled:text-muted-foreground")}
+                      value={b.r || ""}
+                      onChange={(e) => patch(i, { r: Number(e.target.value) })}
+                      placeholder="0"
+                    />
+                  </td>
+                  <td className="p-1.5">
+                    <select
+                      aria-label="Container type"
+                      className={cell}
+                      value={b.ct || ""}
+                      onChange={(e) => patch(i, { ct: e.target.value })}
+                    >
+                      <option value="">Select</option>
+                      {CONTAINER_TYPES.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </td>
+                  <td className="p-1.5">
+                    <input
+                      aria-label="Container Qty"
+                      type="number"
+                      min="0"
+                      step="1"
+                      className={cn(cell, "w-20")}
+                      value={b.cc || ""}
+                      onChange={(e) => patch(i, { cc: Number(e.target.value) })}
+                      placeholder="0"
+                    />
+                  </td>
                   <td className="p-1.5 text-right tabular-nums">{fmtMoney(b.q * b.r)}</td>
-                  <td className="p-1.5 text-right"><Button variant="ghost" type="button" aria-label="Remove line" onClick={() => emit(buys.filter((_, j) => j !== i))} className="rounded p-1 text-destructive hover:bg-danger-soft"><X className="size-3.5" /></Button></td>
+                  <td className="p-1.5 text-right">
+                    <Button
+                      variant="ghost"
+                      type="button"
+                      aria-label="Remove line"
+                      onClick={() => emit(buys.filter((_, j) => j !== i))}
+                      className="rounded p-1 text-destructive hover:bg-danger-soft"
+                    >
+                      <X className="size-3.5" />
+                    </Button>
+                  </td>
                 </tr>
               ))}
             </tbody>
-            <tfoot><tr className="border-t bg-muted/40 text-xs font-semibold"><td className="px-2 py-2" colSpan={2}>{buys.length} lines</td><td className="px-2 py-2 tabular-nums">{kgTotal.toLocaleString("en-IN")}</td><td /><td /><td className="px-2 py-2 tabular-nums">{containerTotal.toLocaleString("en-IN")}</td><td className="px-2 py-2 text-right tabular-nums">{fmtMoney(amount)}</td><td /></tr></tfoot>
+            <tfoot>
+              <tr className="border-t bg-muted/40 text-xs font-semibold">
+                <td className="px-2 py-2" colSpan={2}>{buys.length} lines</td>
+                <td className="px-2 py-2 tabular-nums">{kgTotal.toLocaleString("en-IN")}</td>
+                <td className="px-2 py-2 tabular-nums font-semibold text-primary">{avgRate > 0 ? fmtMoney(avgRate) : "—"}</td>
+                <td />
+                <td className="px-2 py-2 tabular-nums">{containerTotal.toLocaleString("en-IN")}</td>
+                <td className="px-2 py-2 text-right tabular-nums">{fmtMoney(amount)}</td>
+                <td />
+              </tr>
+            </tfoot>
           </table>
         </div>
       )}
-      <Button variant="ghost" type="button" onClick={() => emit([...buys, { s: "", p: "", q: 0, r: 0 }])} className="inline-flex items-center gap-1 rounded-full border bg-card px-3 py-1 text-xs font-medium hover:border-primary hover:text-primary"><Plus className="size-3" /> Add purchase line</Button>
+      <Button
+        variant="ghost"
+        type="button"
+        onClick={() => emit([...buys, { s: commonSupplier || suppliers[0] || "", p: "", q: 0, r: 0 }])}
+        className="inline-flex items-center gap-1 rounded-full border bg-card px-3 py-1 text-xs font-medium hover:border-primary hover:text-primary"
+      >
+        <Plus className="size-3" /> Add purchase line
+      </Button>
     </div>
   );
 }

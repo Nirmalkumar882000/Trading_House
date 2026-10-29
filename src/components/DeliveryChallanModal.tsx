@@ -84,7 +84,7 @@ export function DeliveryChallanModal({
               <h1 className="text-xl font-bold tracking-tight text-zinc-900">
                 {isTransport ? "MARKET TRANSPORT DELIVERY CHALLAN" : "OUTWARD SALES DELIVERY CHALLAN"}
               </h1>
-              <p className="text-xs text-zinc-500">Koyambedu Wholesale Complex, Chennai · GSTIN: 33AAACV9876K1Z2</p>
+              <p className="text-xs text-zinc-500">Udumalaipet Wholesale Complex, Tiruppur Dist · GSTIN: 33AAACV9876K1Z2</p>
             </div>
             <div className="text-right text-xs">
               <p className="font-mono font-bold text-sm text-zinc-900">{challanNo}</p>
@@ -105,7 +105,7 @@ export function DeliveryChallanModal({
                 {isTransport ? (record["supplier"] || "Various Market Suppliers") : record["buyer"]}
               </p>
               <p className="text-zinc-600">
-                {isTransport ? "Koyambedu Market Yard" : "Retail Store / Warehouse Dispatch"}
+                {isTransport ? "Udumalaipet Market Yard" : "Retail Store / Warehouse Dispatch"}
               </p>
               <p className="text-zinc-500 font-mono mt-0.5">
                 Ref: {String(record["po"] || record["so"] || record.id)}

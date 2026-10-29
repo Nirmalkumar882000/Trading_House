@@ -65,9 +65,10 @@ export function syncProductCatalog(newCatalog: ProductItem[]): void {
 }
 
 export const WAREHOUSES = [
-  "Main Warehouse (Koyambedu)",
-  "North Depot (Madhavaram)",
-  "South Hub (Tambaram)",
+  "Main Warehouse (Udumalaipet)",
+  "Pollachi Depot",
+  "Madathukulam Hub",
+  "Dharapuram Hub",
 ];
 
 export const DEFAULT_WAREHOUSE = WAREHOUSES[0];
@@ -194,10 +195,10 @@ export const STAGES = [
   "H · Money & people",
 ] as const;
 
-export const SUPPLIERS = ["Murugan Traders", "Sri Lakshmi Vegetables", "Koyambedu Fresh Co", "Anbu Agro Supplies", "Velu & Sons"];
+export const SUPPLIERS = ["Murugan Traders", "Sri Lakshmi Vegetables", "Udumalai Fresh Agro", "Pollachi Green Farms", "Velu & Sons"];
 export const BUYERS = ["FreshMart Retail", "Green Basket Stores", "Hotel Saravana Bhavan", "Annapoorna Caterers", "Nilgiris Supermarket"];
 export const EMPLOYEES = ["Ravi Kumar", "Priya S", "Karthik M", "Divya R", "Senthil P", "Meena K"];
-const VEHICLES = ["TN 09 AB 1234", "TN 22 CD 5678", "TN 07 EF 9012"];
+const VEHICLES = ["TN 78 AB 1234", "TN 41 CD 5678", "TN 39 EF 9012"];
 const DRIVERS = ["Raja", "Ganesh", "Suresh"];
 const n = (v: unknown) => Number(v) || 0;
 const d = (day: number) => `2026-10-${String(day).padStart(2, "0")}`;
@@ -212,11 +213,11 @@ const BASE_MODULES: ModuleDef[] = [
       { key: "name", label: "Supplier name", list: true, required: true },
       { key: "contact", label: "Contact person", list: true },
       { key: "phone", label: "Phone", list: true },
-      { key: "market", label: "Market", type: "select", options: ["Koyambedu", "Oddanchatram", "Mettupalayam", "Hosur"], list: true },
+      { key: "market", label: "Market", type: "select", options: ["Udumalaipet", "Pollachi", "Oddanchatram", "Dharapuram", "Madathukulam"], list: true },
       { key: "gstin", label: "GSTIN" },
       { key: "payable", label: "Outstanding payable", type: "number", money: true, list: true },
     ],
-    seed: SUPPLIERS.map((s, i) => ({ name: s, contact: ["Murugan", "Lakshmi", "Bala", "Anbu", "Velu"][i], phone: `98400${10230 + i * 17}`, market: ["Koyambedu", "Oddanchatram", "Koyambedu", "Hosur", "Mettupalayam"][i], gstin: `33ABCDE${1200 + i}F1Z${i}`, payable: s === "Murugan Traders" ? 3960 : 0, status: i === 4 ? "Pending" : "Active" })),
+    seed: SUPPLIERS.map((s, i) => ({ name: s, contact: ["Murugan", "Lakshmi", "Bala", "Anbu", "Velu"][i], phone: `98400${10230 + i * 17}`, market: ["Udumalaipet", "Pollachi", "Udumalaipet", "Pollachi", "Oddanchatram"][i], gstin: `33ABCDE${1200 + i}F1Z${i}`, payable: s === "Murugan Traders" ? 3960 : 0, status: i === 4 ? "Pending" : "Active" })),
   },
   {
     slug: "buyers", title: "Buyers", stage: STAGES[0], flows: "F01 · F13", prefix: "BUY",
@@ -230,7 +231,7 @@ const BASE_MODULES: ModuleDef[] = [
       { key: "creditLimit", label: "Credit limit", type: "number", money: true, list: true },
       { key: "receivable", label: "Receivable", type: "number", money: true, list: true },
     ],
-    seed: BUYERS.map((b, i) => ({ name: b, type: ["Retail", "Retail", "Hotel", "Caterer", "Wholesale"][i], city: ["Chennai", "Chennai", "Coimbatore", "Madurai", "Chennai"][i], phone: `90030${44120 + i * 9}`, creditLimit: [200000, 150000, 100000, 75000, 300000][i], receivable: b === "FreshMart Retail" ? 840 : 0, status: i === 3 ? "Registered" : "Approved" })),
+    seed: BUYERS.map((b, i) => ({ name: b, type: ["Retail", "Retail", "Hotel", "Caterer", "Wholesale"][i], city: ["Udumalaipet", "Pollachi", "Coimbatore", "Tiruppur", "Palani"][i], phone: `90030${44120 + i * 9}`, creditLimit: [200000, 150000, 100000, 75000, 300000][i], receivable: b === "FreshMart Retail" ? 840 : 0, status: i === 3 ? "Registered" : "Approved" })),
   },
   {
     slug: "employees", title: "Employees & access", stage: STAGES[0], flows: "F01", prefix: "EMP",
@@ -581,7 +582,7 @@ const BASE_MODULES: ModuleDef[] = [
     ],
     seed: [
       { date: d(21), supplier: "Murugan Traders", ref: "TRP-1001", mode: "NEFT", amount: 5000, status: "Paid" },
-      { date: d(22), supplier: "Koyambedu Fresh Co", ref: "TRP-1002", mode: "UPI", amount: 3300, status: "Paid" },
+      { date: d(22), supplier: "Udumalai Fresh Agro", ref: "TRP-1002", mode: "UPI", amount: 3300, status: "Paid" },
       { date: d(22), supplier: "Sri Lakshmi Vegetables", ref: "TRP-1003", mode: "NEFT", amount: 3000, status: "Paid" },
     ],
   },

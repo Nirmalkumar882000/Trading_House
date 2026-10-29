@@ -28,12 +28,12 @@ export function BusinessProfilePage({ mod }: { mod: ModuleDef }) {
     contactPerson: "Ravi Kumar (Managing Partner)",
     phone: "+91 98400 11223",
     email: "ops@velaanbay.com",
-    address: "Plot 14, Cold Storage Corridor, Koyambedu Wholesale Market Complex, Chennai, Tamil Nadu 600092",
-    bankName: "HDFC Bank, Koyambedu Wholesale Branch",
+    address: "Plot 14, Cold Storage Corridor, Udumalaipet Wholesale Market Complex, Udumalaipet, Tamil Nadu 642126",
+    bankName: "HDFC Bank, Udumalaipet Branch",
     accountNumber: "50200088991122",
     ifsc: "HDFC0001234",
     fssaiLicense: "12426002000188",
-    marketMembership: "Koyambedu Wholesale Vegetable Merchants Association (KWVMA-884)",
+    marketMembership: "Udumalaipet & Pollachi Wholesale Vegetable Merchants Association (UPVMA-884)",
   });
 
   const [isEditing, setIsEditing] = useState(false);
@@ -95,7 +95,7 @@ export function BusinessProfilePage({ mod }: { mod: ModuleDef }) {
             <h2 className="text-lg font-bold">{profile.tradeName}</h2>
             <p className="text-xs opacity-85 font-mono">{profile.legalName}</p>
             <div className="mt-1 flex flex-wrap gap-2 text-[11px] opacity-90">
-              <span className="flex items-center gap-1"><MapPin className="size-3" /> Koyambedu Wholesale Complex</span>
+              <span className="flex items-center gap-1"><MapPin className="size-3" /> Udumalaipet Wholesale Complex</span>
               <span>·</span>
               <span className="flex items-center gap-1"><ShieldCheck className="size-3" /> GSTIN: {profile.gstin}</span>
             </div>
