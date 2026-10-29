@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { Boxes, Download, Search, ArrowRight, RotateCcw, Package, CheckCircle2, AlertTriangle, Layers, MapPin } from 'lucide-react';
+import { Boxes, Download, Search, ArrowRight, RotateCcw, Package, CheckCircle2, AlertTriangle, Layers, MapPin, Building2 } from 'lucide-react';
 import { Button } from './ui/button';
 import { useStore } from '@/lib/store';
 import { lines, movements, stock, type Category, locations } from '@/lib/workflow';
-import { PRODUCT_CATALOG, type ModuleDef } from '@/lib/modules';
+import { PRODUCT_CATALOG, type ModuleDef, WAREHOUSES, DEFAULT_WAREHOUSE } from '@/lib/modules';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 
@@ -15,11 +15,20 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
   const [q, setQ] = useState('');
   const [category, setCategory] = useState('All');
   const [hideZero, setHideZero] = useState(true);
+  const [selectedWarehouse, setSelectedWarehouse] = useState<string>('All');
 
-  const balances = stock(data);
-  const ledger = movements(data);
+  const balances = stock(data, selectedWarehouse);
+  const allMoves = movements(data);
+  const ledger = selectedWarehouse === 'All' ? allMoves : allMoves.filter((m) => m.warehouse === selectedWarehouse);
   const isInventory = mod.slug === 'inventory';
   const isLedger = mod.slug === 'stock-movements';
+
+  // Total KG by warehouse facility for instant overview
+  const warehouseStockSummary = WAREHOUSES.map((wh) => {
+    const whBalances = stock(data, wh);
+    const totalKg = whBalances.reduce((sum, b) => sum + (b.qty > 0 ? b.qty : 0), 0);
+    return { name: wh, totalKg };
+  });
 
   const products = [
     ...new Set([
@@ -30,7 +39,7 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
 
   const qty = (slug: string, p: string, status?: string[]) =>
     (data[slug] || [])
-      .filter((r) => !status || status.includes(r.status))
+      .filter((r) => (!status || status.includes(r.status)) && (selectedWarehouse === 'All' || (r['warehouse'] || DEFAULT_WAREHOUSE) === selectedWarehouse))
       .reduce((s, r) => s + (lines(r, slug === 'trips' ? 'net' : 'qty').find((l) => l.p === p)?.q || 0), 0);
 
   const report = products.map((p) => ({
@@ -38,7 +47,7 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
     purchased: qty('trips', p, ['Submitted']),
     received: qty('receipts', p, ['Posted']),
     gradeA: (data['quality-check'] || [])
-      .filter((r) => r.status !== 'Assigned')
+      .filter((r) => r.status !== 'Assigned' && (selectedWarehouse === 'All' || (r['warehouse'] || DEFAULT_WAREHOUSE) === selectedWarehouse))
       .reduce(
         (s, r) =>
           s +
@@ -47,7 +56,7 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
         0
       ),
     gradeB: (data['quality-check'] || [])
-      .filter((r) => r.status === 'Stage 2 done')
+      .filter((r) => r.status === 'Stage 2 done' && (selectedWarehouse === 'All' || (r['warehouse'] || DEFAULT_WAREHOUSE) === selectedWarehouse))
       .reduce((s, r) => s + (lines(r).find((l) => l.p === p)?.b || 0), 0),
     sold: qty('sales-orders', p, ['Dispatched', 'Closed']),
     returned: qty('returns', p, ['Received', 'Sent to QC']),
@@ -94,9 +103,9 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
   };
 
   const headers = isInventory
-    ? ['PRODUCT NAME', 'STOCK CATEGORY', 'STORAGE LOCATION BAY', 'AVAILABLE BALANCE', 'STOCK STATUS']
+    ? ['PRODUCT NAME', 'WAREHOUSE FACILITY', 'STOCK CATEGORY', 'STORAGE LOCATION BAY', 'AVAILABLE BALANCE', 'STOCK STATUS']
     : isLedger
-    ? ['REFERENCE', 'SOURCE REFERENCE', 'PRODUCT', 'SOURCE', 'DESTINATION', 'QUANTITY', 'DATE', 'RESPONSIBLE']
+    ? ['REFERENCE', 'WAREHOUSE', 'SOURCE REFERENCE', 'PRODUCT', 'SOURCE', 'DESTINATION', 'QUANTITY', 'DATE', 'RESPONSIBLE']
     : ['PRODUCT', 'PURCHASED', 'RECEIVED', 'GRADE A OUTPUT', 'GRADE B OUTPUT', 'SOLD', 'RETURNED', 'STOCK REMAINING'];
 
   const kpiCategories: Category[] = ['Grade A', 'Grade B', 'Packed', 'Ungraded', 'Remaining', 'Rejected'];
@@ -231,6 +240,48 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
         })}
       </div>
 
+      {/* Multi-Warehouse Filter Facility Pills */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-card p-3.5 shadow-xs">
+        <div className="flex items-center gap-2.5">
+          <div className="grid size-9 place-items-center rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400">
+            <Building2 className="size-4" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-foreground">Receiving Warehouse:</span>
+              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">
+                {selectedWarehouse === 'All' ? 'Consolidated All Bays' : selectedWarehouse}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Filter balances, incoming lots, and stock movements by warehouse depot
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          {['All', ...WAREHOUSES].map((wh) => {
+            const isSel = selectedWarehouse === wh;
+            return (
+              <button
+                key={wh}
+                type="button"
+                onClick={() => setSelectedWarehouse(wh)}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all',
+                  isSel
+                    ? 'bg-primary text-primary-foreground shadow-xs'
+                    : 'bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground'
+                )}
+              >
+                <Building2 className="size-3" />
+                <span>{wh === 'All' ? 'All Warehouses' : wh}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Filter and Action Toolbar */}
       <div className="flex flex-wrap items-center gap-3 border-b pb-4">
         <div className="relative min-w-56 flex-1">
@@ -282,7 +333,7 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
           <thead className="bg-muted/70 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
             <tr>
               {headers.map((h, i) => (
-                <th key={h} className={cn('px-4 py-3 text-left', (i === 3 || i === 4) && 'text-right')}>
+                <th key={h} className={cn('px-4 py-3 text-left', (i === 4 || i === 5) && 'text-right')}>
                   {h}
                 </th>
               ))}
@@ -317,6 +368,14 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
                             )}
                           </div>
                         </div>
+                      </td>
+
+                      {/* Warehouse Facility */}
+                      <td className="px-4 py-3.5">
+                        <span className="inline-flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400 border border-amber-500/20">
+                          <Building2 className="size-3 text-amber-600 dark:text-amber-400" />
+                          {selectedWarehouse === 'All' ? 'All Warehouses' : selectedWarehouse}
+                        </span>
                       </td>
 
                       {/* Stock Category Badge */}
@@ -366,7 +425,13 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
               ? shownLedger.map((m) => (
                   <tr key={m.id} className="hover:bg-muted/20 transition-colors">
                     <td className="px-4 py-3 font-mono text-xs font-semibold text-primary">{m.ref}</td>
-                    <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{m.purchase}</td>
+                    <td className="px-4 py-3">
+                      <span className="inline-flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400 border border-amber-500/20">
+                        <Building2 className="size-3 text-amber-600 dark:text-amber-400" />
+                        {m.warehouse || DEFAULT_WAREHOUSE}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{m.purchase || '—'}</td>
                     <td className="px-4 py-3 font-semibold text-foreground">{m.product}</td>
                     <td className="px-4 py-3">{m.source}</td>
                     <td className="px-4 py-3">{m.destination}</td>

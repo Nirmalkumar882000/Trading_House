@@ -183,7 +183,7 @@ export function BluetoothScaleModal({
             >
               {receipts.map((r) => (
                 <option key={r.id} value={r.id}>
-                  {r.id} · DC: {String(r["dc"] || "—")} · Sent: {num(r["sent"])} kg ({linesLabel(r)})
+                  {r.id} · {r["warehouse"] ? `[${r["warehouse"]}] · ` : ""}DC: {String(r["dc"] || "—")} · Sent: {num(r["sent"])} kg ({linesLabel(r)})
                 </option>
               ))}
             </select>

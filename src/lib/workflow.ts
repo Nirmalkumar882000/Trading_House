@@ -1,4 +1,5 @@
 import type { Row } from './modules';
+import { WAREHOUSES, DEFAULT_WAREHOUSE } from './modules';
 export type Data = Record<string, Row[]>;
 export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; packKg?: number; packLabel?: string };
 export const num = (v: unknown) => Number(v) || 0;
@@ -24,35 +25,58 @@ export function lines(r: Row, fallback = 'qty') { const ls = parseLines(r['item'
 export const total = (ls: ProductLine[]) => round(ls.reduce((s,l) => s + l.q, 0));
 export const locations = { Ungraded: 'Receiving bay', 'Grade A': 'A · Fresh room', Remaining: 'QC holding bay', 'Grade B': 'B · Secondary room', Rejected: 'Reject isolation', Quarantine: 'Returns inspection bay', Allocated: 'Allocation bay', Packed: 'Dispatch bay' };
 export type Category = keyof typeof locations;
-export type Movement = { id: string; ref: string; purchase: string; product: string; source: string; destination: string; qty: number; date: string; person: string };
+export type Movement = { id: string; ref: string; purchase: string; product: string; source: string; destination: string; qty: number; date: string; person: string; warehouse: string };
 export function movements(data: Data): Movement[] {
   const out: Movement[] = [];
-  const move = (r: Row, l: ProductLine, source: string, destination: string, q: number, purchase = '') => {
-    if (q > 0) out.push({ id: `${r.id}-${out.length}`, ref: r.id, purchase, product: l.p, source, destination, qty: round(q), date: String(r['date'] || '2026-10-22'), person: String(r['responsible'] || r['grader'] || r['packer'] || 'Ravi Kumar') });
+  const move = (r: Row, l: ProductLine, source: string, destination: string, q: number, purchase = '', wh = '') => {
+    if (q > 0) {
+      const warehouse = wh || String(r['warehouse'] || DEFAULT_WAREHOUSE);
+      out.push({
+        id: `${r.id}-${out.length}`,
+        ref: r.id,
+        purchase,
+        product: l.p,
+        source,
+        destination,
+        qty: round(q),
+        date: String(r['date'] || '2026-10-22'),
+        person: String(r['responsible'] || r['grader'] || r['packer'] || 'Ravi Kumar'),
+        warehouse,
+      });
+    }
   };
-  for (const r of data['receipts'] || []) if (r.status === 'Posted') for (const l of lines(r,'received')) move(r,l,'Market', 'Ungraded', l.q, String(r['dc']));
-  for (const r of data['returns'] || []) if (['Received','Sent to QC'].includes(r.status)) for (const l of lines(r)) move(r,l,'Buyer', 'Remaining',l.q,String(r['sale']));
+  for (const r of data['receipts'] || []) if (r.status === 'Posted') for (const l of lines(r,'received')) move(r,l,'Market', 'Ungraded', l.q, String(r['dc']), String(r['warehouse'] || DEFAULT_WAREHOUSE));
+  for (const r of data['returns'] || []) if (['Received','Sent to QC'].includes(r.status)) for (const l of lines(r)) move(r,l,'Buyer', 'Remaining',l.q,String(r['sale']), String(r['warehouse'] || DEFAULT_WAREHOUSE));
   for (const r of data['quality-check'] || []) {
     if (r.status === 'Assigned') continue;
+    const qcWh = String(r['warehouse'] || (data['receipts'] || []).find(x => x.id === r['lot'])?.['warehouse'] || DEFAULT_WAREHOUSE);
     for (const l of lines(r,'input')) {
       const a = num(l.a); const rem = round(l.q - a); const source = 'Ungraded';
-      move(r,l,source,'Grade A',a,String(r['lot'])); move(r,l,source,'Remaining',rem,String(r['lot']));
-      if (r.status === 'Stage 2 done') { move(r,l,'Remaining','Grade A',num(l.a2),String(r['lot'])); move(r,l,'Remaining','Grade B',num(l.b),String(r['lot'])); move(r,l,'Remaining','Rejected',round(rem+num(l.ret)-num(l.a2)-num(l.b)),String(r['lot'])); }
+      move(r,l,source,'Grade A',a,String(r['lot']), qcWh); move(r,l,source,'Remaining',rem,String(r['lot']), qcWh);
+      if (r.status === 'Stage 2 done') { move(r,l,'Remaining','Grade A',num(l.a2),String(r['lot']), qcWh); move(r,l,'Remaining','Grade B',num(l.b),String(r['lot']), qcWh); move(r,l,'Remaining','Rejected',round(rem+num(l.ret)-num(l.a2)-num(l.b)),String(r['lot']), qcWh); }
     }
   }
-  for (const r of data['packing'] || []) for (const l of lines(r)) {
-    move(r,l,String(r['grade']),'Allocated',l.q,String(r['po']));
-    if (['Packed','In sales stock'].includes(r.status)) move(r,l,'Allocated','Packed',l.q,String(r['po']));
+  for (const r of data['packing'] || []) {
+    const packWh = String(r['warehouse'] || (data['purchase-orders'] || []).find(x => x.id === r['po'])?.['warehouse'] || DEFAULT_WAREHOUSE);
+    for (const l of lines(r)) {
+      move(r,l,String(r['grade']),'Allocated',l.q,String(r['po']), packWh);
+      if (['Packed','In sales stock'].includes(r.status)) move(r,l,'Allocated','Packed',l.q,String(r['po']), packWh);
+    }
   }
-  for (const r of data['sales-orders'] || []) if (['Dispatched','Closed'].includes(r.status)) for (const l of lines(r)) move(r,l,'Packed','Buyer',l.q,String(r['po']));
+  for (const r of data['sales-orders'] || []) if (['Dispatched','Closed'].includes(r.status)) {
+    const saleWh = String(r['warehouse'] || (data['packing'] || []).find(x => x.id === r['packing'])?.['warehouse'] || DEFAULT_WAREHOUSE);
+    for (const l of lines(r)) move(r,l,'Packed','Buyer',l.q,String(r['po']), saleWh);
+  }
   return out;
 }
-export function stock(data: Data) {
-  const map = new Map<string, { product: string; category: Category; qty: number; location: string }>();
-  for (const m of movements(data)) for (const [category,sign] of [[m.source,-1],[m.destination,1]] as const) {
+export function stock(data: Data, warehouse?: string) {
+  const map = new Map<string, { product: string; category: Category; qty: number; location: string; warehouse?: string }>();
+  const allMoves = movements(data);
+  const moves = warehouse && warehouse !== 'All' ? allMoves.filter(m => m.warehouse === warehouse) : allMoves;
+  for (const m of moves) for (const [category,sign] of [[m.source,-1],[m.destination,1]] as const) {
     if (!(category in locations)) continue;
     const c = category as Category; const key = `${m.product}|${c}`;
-    const v = map.get(key) || { product:m.product, category:c, qty:0, location:locations[c] }; v.qty = round(v.qty + sign*m.qty); map.set(key,v);
+    const v = map.get(key) || { product:m.product, category:c, qty:0, location:locations[c], warehouse: warehouse || 'All Warehouses' }; v.qty = round(v.qty + sign*m.qty); map.set(key,v);
   }
   return [...map.values()];
 }
@@ -74,9 +98,9 @@ export function returnsAvailable(data: Data, product: string, excludeId = ''): n
   return Math.max(0, round(returned - used));
 }
 export const bagBreakdown = (qty: number, size: number) => ({ full: size > 0 ? Math.floor(qty / size) : 0, partial: size > 0 ? round(qty % size) : qty, opened: size > 0 && round(qty % size) > 0 ? 1 : 0 });
-export type Buy = { s: string; p: string; q: number; r: number };
+export type Buy = { s: string; p: string; q: number; r: number; ct?: string; cc?: number };
 export function parseBuys(v: unknown): Buy[] {
-  try { const x: unknown = JSON.parse(String(v || '[]')); if (Array.isArray(x)) return x.map(b => ({ s: String(b.s || ''), p: String(b.p || ''), q: num(b.q), r: num(b.r) })); } catch { /* ignore */ }
+  try { const x: unknown = JSON.parse(String(v || '[]')); if (Array.isArray(x)) return x.map(b => ({ s: String(b.s || ''), p: String(b.p || ''), q: num(b.q), r: num(b.r), ct: String(b.ct || ''), cc: num(b.cc) })); } catch { /* ignore */ }
   return [];
 }
 export function buysFromTrip(r: Row): Buy[] {
@@ -88,7 +112,10 @@ export function normalize(slug: string, r: Row): Row {
     const buys = parseBuys(r['buys']); const merged = new Map<string, number>();
     for (const b of buys) if (b.p) merged.set(b.p, round((merged.get(b.p) || 0) + b.q));
     const qty = round(buys.reduce((s,b)=>s+b.q,0)); const amount = round(buys.reduce((s,b)=>s+b.q*b.r,0));
-    r = { ...r, item: JSON.stringify([...merged].map(([p,q]) => ({ p, q }))), supplier: [...new Set(buys.map(b=>b.s).filter(Boolean))].join(', '), rate: qty ? round(amount/qty) : 0, amount };
+    // Trip container totals come from the per-line container type and count.
+    const containerLines = buys.filter(b => b.cc);
+    const containerTotals = containerLines.length ? { containerCount: containerLines.reduce((s,b)=>s+(b.cc||0),0), containerType: [...new Set(containerLines.map(b=>b.ct).filter(Boolean))].join(', ') } : {};
+    r = { ...r, item: JSON.stringify([...merged].map(([p,q]) => ({ p, q }))), supplier: [...new Set(buys.map(b=>b.s).filter(Boolean))].join(', '), rate: qty ? round(amount/qty) : 0, amount, ...containerTotals };
   }
   const ls = lines(r, slug === 'receipts' ? 'received' : slug === 'quality-check' ? 'input' : 'qty'); let qty = total(ls);
   const full = { ...r };
@@ -98,7 +125,7 @@ export function normalize(slug: string, r: Row): Row {
     full['extraKg'] = extra;
     full['qty'] = round(qty + extra);
   }
-  if (slug === 'trips') { full['net'] = qty; full['amount'] = round(qty*num(r['rate'])); }
+  if (slug === 'trips') { full['net'] = qty; full['amount'] = r['buys'] ? num(r['amount']) : round(qty*num(r['rate'])); }
   if (slug === 'supplier-prices') {
     const hasLineRates = ls.some(l => num(l.r) > 0);
     if (hasLineRates) {
@@ -110,6 +137,9 @@ export function normalize(slug: string, r: Row): Row {
     }
   }
   if (slug === 'receipts') {
+    if (!full['warehouse']) {
+      full['warehouse'] = r['warehouse'] || DEFAULT_WAREHOUSE;
+    }
     const sent = num(r['sent']);
     const lineTot = total(ls);
     const hasExplicitReceived = r['received'] !== undefined && r['received'] !== null && r['received'] !== '';
@@ -127,7 +157,12 @@ export function normalize(slug: string, r: Row): Row {
       full['reason'] = Math.abs(num(full['diff']) / (sent || 1)) > 0.1 ? 'Spillage' : 'Moisture loss';
     }
   }
-  if (slug === 'quality-check') { full['input'] = qty; full['gradeA'] = round(ls.reduce((s,l)=>s+num(l.a)+(r.status === 'Stage 2 done' ? num(l.a2) : 0),0)); full['reject'] = round(ls.reduce((s,l)=>s+l.q-num(l.a)+(r.status === 'Stage 2 done' ? num(l.ret) : 0),0)); full['gradeB'] = r.status === 'Stage 2 done' ? round(ls.reduce((s,l)=>s+num(l.b),0)) : 0; full['trash'] = r.status === 'Stage 2 done' ? round(ls.reduce((s,l)=>s+num(l.ret),0)+qty-num(full['gradeA'])-num(full['gradeB'])) : 0; }
+  if (slug === 'quality-check') {
+    if (!full['warehouse']) {
+      full['warehouse'] = r['warehouse'] || DEFAULT_WAREHOUSE;
+    }
+    full['input'] = qty; full['gradeA'] = round(ls.reduce((s,l)=>s+num(l.a)+(r.status === 'Stage 2 done' ? num(l.a2) : 0),0)); full['reject'] = round(ls.reduce((s,l)=>s+l.q-num(l.a)+(r.status === 'Stage 2 done' ? num(l.ret) : 0),0)); full['gradeB'] = r.status === 'Stage 2 done' ? round(ls.reduce((s,l)=>s+num(l.b),0)) : 0; full['trash'] = r.status === 'Stage 2 done' ? round(ls.reduce((s,l)=>s+num(l.ret),0)+qty-num(full['gradeA'])-num(full['gradeB'])) : 0;
+  }
   if (slug === 'packing') { full['nominal'] = qty; full['packs'] = ls.reduce((s,l)=>s+Math.ceil(l.q / Math.max(0.001,num(r['packSize']))),0); }
   if (slug === 'sales-orders') full['value'] = round(qty*num(r['rate']));
   if (slug === 'containers') {
@@ -290,6 +325,7 @@ export function populate(slug: string, key: string, value: string, form: Row, da
       item: ref['item'] || '',
       sent: num(ref['net']),
       received: num(ref['net']),
+      warehouse: ref['warehouse'] || r['warehouse'] || DEFAULT_WAREHOUSE,
       containerType: ref['containerType'] || r['containerType'] || 'Plastic crates',
       containerCount: num(ref['containerCount']) || r['containerCount'] || 0,
       supplier: sup || r['supplier'] || '',
@@ -311,8 +347,12 @@ export function populate(slug: string, key: string, value: string, form: Row, da
   }
   if (slug === 'quality-check') {
     const used = (data['quality-check'] || []).filter(x=>x.id!==form.id && x['lot']===value);
-    const ls = lines(ref, target==='receipts'?'received':'qty').map(l=>({p:l.p,q:Math.max(0,round(l.q-used.reduce((s,x)=>s+(lines(x,'input').find(i=>i.p===l.p)?.q || 0),0))),a:0,a2:0,b:0,ret:0})).filter(l=>l.q>0);
-    r = {...r,item:JSON.stringify(ls)};
+    const ls = lines(ref, target==='receipts'?'received':'qty').map(l=>({p:l.p,q:Math.max(0,round(l.q-used.reduce((s,x)=>s+(lines(x,'input').filter(i=>i.p===l.p).reduce((acc, i) => acc + i.q, 0)),0))),a:0,a2:0,b:0,ret:0})).filter(l=>l.q>0);
+    r = {
+      ...r,
+      warehouse: ref['warehouse'] || r['warehouse'] || DEFAULT_WAREHOUSE,
+      item: JSON.stringify(ls),
+    };
   }
   if (slug === 'sales-orders' && key==='po') {
     const sold = (data['sales-orders'] || []).filter(x=>x.id!==form.id && x['po']===value);
@@ -392,7 +432,7 @@ export function validateData(data: Data): string | null {
     for (const r of data[slug] || []) {
       if (seen.has(r.id)) return `Duplicate reference ${r.id}.`; seen.add(r.id);
       const ls = lines(r,slug==='receipts'?'received':slug==='quality-check'?'input':'qty');
-      if (new Set(ls.map(l=>l.p)).size!==ls.length) return `${r.id}: duplicate products are not allowed.`;
+      if (slug !== 'quality-check' && new Set(ls.map(l=>l.p)).size!==ls.length) return `${r.id}: duplicate products are not allowed.`;
       if (ls.some(l=>!Number.isFinite(l.q) || l.q<0)) return `${r.id}: quantities cannot be negative.`;
       if (['purchase-orders','trips','quality-check','packing','sales-orders','returns'].includes(slug) && (!ls.length || ls.some(l=>l.q<=0 && !(slug==='quality-check' && num(l.ret)>0)))) return `${r.id}: select products with positive KG quantities.`;
       if (slug==='trips' && num(r['rate'])<0) return 'Purchase price cannot be negative.';
@@ -412,9 +452,12 @@ export function validateData(data: Data): string | null {
         if (!ref || ref.status!=='Posted') return `${r.id}: select a received, posted source.`;
         for (const l of ls) {
           if ([num(l.a),num(l.a2),num(l.b),num(l.ret)].some(q=>q<0) || num(l.a)>l.q || num(l.a2)+num(l.b)>round(l.q-num(l.a)+num(l.ret))) return `${r.id}: grades cannot exceed ${l.p} input quantity.`;
-          const received = lines(ref,'received').find(x=>x.p===l.p)?.q || 0;
-          const graded = (data['quality-check'] || []).filter(x=>x['lot']===r['lot'] ).reduce((s,x)=>s+(lines(x,'input').find(i=>i.p===l.p)?.q || 0),0);
-          if (graded>received+0.001) return `${r.id}: ${l.p} is already assigned or graded; input exceeds source.`;
+        }
+        const distinctProducts = [...new Set(ls.map(l => l.p))];
+        for (const p of distinctProducts) {
+          const received = lines(ref,'received').filter(x=>x.p===p).reduce((s,x)=>s+x.q, 0);
+          const graded = (data['quality-check'] || []).filter(x=>x['lot']===r['lot']).reduce((s,x)=>s+(lines(x,'input').filter(i=>i.p===p).reduce((acc, i) => acc + i.q, 0)),0);
+          if (graded>received+0.001) return `${r.id}: ${p} is already assigned or graded; input exceeds source.`;
         }
       }
       if (slug==='receipts') {
@@ -449,15 +492,21 @@ export function validateData(data: Data): string | null {
         for (const l of ls) { const returned=(data['returns'] || []).filter(x=>x['sale']===r['sale']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0); if (returned>(lines(sale).find(x=>x.p===l.p)?.q || 0)+0.001) return `${l.p}: returned quantity exceeds original sale.`; }
       }
       if (slug==='dispatch' || slug==='transport') {
-        const inward = slug === 'transport' && (r['direction'] === 'Inward' || r['direction'] === 'Inward Return');
-        const outwardReturn = slug === 'transport' && r['direction'] === 'Outward Return';
-        const key = slug === 'dispatch' ? 'so' : 'ref';
-        const targetModule = inward ? 'trips' : outwardReturn ? 'returns' : 'sales-orders';
-        const ref = (data[targetModule] || []).find(x => x.id === r[key]);
-        if (!ref) return 'Select a valid purchase, return, or sales reference.';
-        if (!inward && !outwardReturn && !activeSale(ref)) return 'Outward transport requires a dispatched sale.';
-        if ((data[slug] || []).filter(x => x[key] === r[key] && (slug === 'dispatch' || x['direction'] === r['direction'])).length > 1) return 'Transport already exists for this reference.';
-        if (num(r['qty']) > total(lines(ref, inward ? 'net' : 'qty')) + 0.001) return 'Loading quantity exceeds referenced quantity.';
+        // Inward Return goes back to a supplier, not against a market trip, so it is checked by container count and supplier.
+        if (slug === 'transport' && r['direction'] === 'Inward Return') {
+          if (num(r['containerCount']) <= 0) return 'Return container count must be greater than zero.';
+          if (!r['supplier']) return 'Select a supplier for the return.';
+        } else {
+          const inward = slug === 'transport' && r['direction'] === 'Inward';
+          const outwardReturn = slug === 'transport' && r['direction'] === 'Outward Return';
+          const key = slug === 'dispatch' ? 'so' : 'ref';
+          const targetModule = inward ? 'trips' : outwardReturn ? 'returns' : 'sales-orders';
+          const ref = (data[targetModule] || []).find(x => x.id === r[key]);
+          if (!ref) return 'Select a valid purchase, return, or sales reference.';
+          if (!inward && !outwardReturn && !activeSale(ref)) return 'Outward transport requires a dispatched sale.';
+          if ((data[slug] || []).filter(x => x[key] === r[key] && (slug === 'dispatch' || x['direction'] === r['direction'])).length > 1) return 'Transport already exists for this reference.';
+          if (num(r['qty']) > total(lines(ref, inward ? 'net' : 'qty')) + 0.001) return 'Loading quantity exceeds referenced quantity.';
+        }
       }
     }
   }

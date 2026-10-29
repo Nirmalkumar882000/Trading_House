@@ -165,9 +165,9 @@ export function getTransportProducts(r: Row, data: Data): ProductLine[] {
 export function TransportPage({ mod }: { mod: ModuleDef }) {
   const { data, upsert, remove } = useStore();
   const rows = data["transport"] || [];
-
   const [search, setSearch] = useState("");
   const [directionFilter, setDirectionFilter] = useState<string>("All");
+  const isReturnView = directionFilter === "Inward Return";
   const [statusFilter, setStatusFilter] = useState<string>("All");
 
   const [viewingChallanRow, setViewingChallanRow] = useState<Row | null>(null);
@@ -714,12 +714,12 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
               <tr>
                 <th className="px-3.5 py-3 font-semibold">ID & Date</th>
                 <th className="px-3.5 py-3 font-semibold">Flow / Direction</th>
-                <th className="px-3.5 py-3 font-semibold">Supplier / Buyer Party</th>
-                <th className="px-3.5 py-3 font-semibold">Ref Document</th>
-                <th className="px-3.5 py-3 font-semibold">Products Loaded</th>
-                <th className="px-3.5 py-3 font-semibold">Fleet & Driver</th>
-                <th className="px-3.5 py-3 text-right font-semibold">Loading KG</th>
-                <th className="px-3.5 py-3 text-right font-semibold">Freight (₹)</th>
+                <th className="px-3.5 py-3 font-semibold">{isReturnView ? "Supplier" : "Supplier / Buyer Party"}</th>
+                {!isReturnView && <th className="px-3.5 py-3 font-semibold">Ref Document</th>}
+                <th className="px-3.5 py-3 font-semibold">{isReturnView ? "Container Type & Count" : "Products Loaded"}</th>
+                {!isReturnView && <th className="px-3.5 py-3 font-semibold">Fleet & Driver</th>}
+                {!isReturnView && <th className="px-3.5 py-3 text-right font-semibold">Loading KG</th>}
+                {!isReturnView && <th className="px-3.5 py-3 text-right font-semibold">Freight (₹)</th>}
                 <th className="px-3.5 py-3 font-semibold">Trip Status</th>
                 <th className="px-3.5 py-3 text-right font-semibold">Actions</th>
               </tr>
@@ -789,6 +789,7 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
                     </td>
 
                     {/* Reference Document */}
+                    {!isReturnView && (
                     <td className="px-3.5 py-3 whitespace-nowrap">
                       {r["ref"] ? (
                         <span className="rounded bg-muted px-2 py-0.5 font-mono text-xs font-semibold text-foreground border">
@@ -798,10 +799,15 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
                         <span className="text-muted-foreground text-xs">—</span>
                       )}
                     </td>
+                    )}
 
                     {/* Products Loaded */}
                     <td className="px-3.5 py-3 max-w-[220px]">
-                      {products.length > 0 ? (
+                      {isReturnView ? (
+                        <span className="inline-flex items-center rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+                          {String(r["containerType"] || "—")} · {Number(r["containerCount"]) || 0}
+                        </span>
+                      ) : products.length > 0 ? (
                         <div className="flex flex-wrap gap-1">
                           {products.slice(0, 2).map((l, idx) => (
                             <span
@@ -823,6 +829,7 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
                     </td>
 
                     {/* Transporter & Driver */}
+                    {!isReturnView && (
                     <td className="px-3.5 py-3">
                       <div className="font-medium text-foreground text-xs flex items-center gap-1.5">
                         <Truck className="size-3 text-muted-foreground" />
@@ -837,8 +844,10 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
                         </span>
                       </div>
                     </td>
+                    )}
 
                     {/* Loading KG */}
+                    {!isReturnView && (
                     <td className="px-3.5 py-3 text-right tabular-nums whitespace-nowrap">
                       <div className="font-mono font-bold text-foreground text-sm">
                         {Number(r["qty"] || 0).toLocaleString("en-IN")} kg
@@ -849,11 +858,14 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
                         </div>
                       ) : null}
                     </td>
+                    )}
 
                     {/* Transport Charges */}
+                    {!isReturnView && (
                     <td className="px-3.5 py-3 text-right tabular-nums font-mono font-semibold text-foreground whitespace-nowrap">
                       ₹{Number(r["charges"] || 0).toLocaleString("en-IN")}
                     </td>
+                    )}
 
                     {/* Trip Status & Step progression */}
                     <td className="px-3.5 py-3 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
@@ -886,6 +898,7 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
                         >
                           <Eye className="size-4" />
                         </Button>
+                        {!isReturnView && (<>
                         <Button
                           variant="ghost"
                           size="sm"
@@ -918,6 +931,7 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
                         >
                           <Trash2 className="size-3.5" />
                         </Button>
+                        </>)}
                       </div>
                     </td>
                   </tr>
@@ -926,7 +940,7 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
 
               {!filteredRows.length && (
                 <tr>
-                  <td colSpan={10} className="px-4 py-14 text-center">
+                  <td colSpan={isReturnView ? 6 : 10} className="px-4 py-14 text-center">
                     <div className="flex flex-col items-center justify-center">
                       <Truck className="size-10 text-muted-foreground/50 mb-2" />
                       <p className="text-base font-semibold text-foreground">No Transport Movements Found</p>
@@ -1243,8 +1257,8 @@ function TransportGatePassModal({
                   <th className="px-4 py-2 font-semibold">#</th>
                   <th className="px-4 py-2 font-semibold">Product Name</th>
                   <th className="px-4 py-2 text-right font-semibold">Net Weight (KG)</th>
-                  <th className="px-4 py-2 text-right font-semibold">Rate (₹/kg)</th>
-                  <th className="px-4 py-2 text-right font-semibold">Amount (₹)</th>
+                  {/* <th className="px-4 py-2 text-right font-semibold">Rate (₹/kg)</th>
+                  <th className="px-4 py-2 text-right font-semibold">Amount (₹)</th> */}
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -1255,12 +1269,12 @@ function TransportGatePassModal({
                     <td className="px-4 py-2 text-right font-mono font-semibold tabular-nums text-foreground">
                       {p.q} kg
                     </td>
-                    <td className="px-4 py-2 text-right font-mono tabular-nums text-muted-foreground">
+                    {/* <td className="px-4 py-2 text-right font-mono tabular-nums text-muted-foreground">
                       {p.r ? `₹${p.r}` : "—"}
                     </td>
                     <td className="px-4 py-2 text-right font-mono tabular-nums text-foreground font-bold">
                       {p.r ? `₹${Math.round(p.q * p.r).toLocaleString("en-IN")}` : "—"}
-                    </td>
+                    </td> */}
                   </tr>
                 ))}
               </tbody>
@@ -1272,10 +1286,10 @@ function TransportGatePassModal({
                   <td className="px-4 py-2.5 text-right font-mono text-primary text-sm tabular-nums">
                     {Number(row["qty"] || total(products)).toLocaleString("en-IN")} kg
                   </td>
-                  <td className="px-4 py-2.5 text-right text-muted-foreground">Freight:</td>
+                  {/* <td className="px-4 py-2.5 text-right text-muted-foreground">Freight:</td>
                   <td className="px-4 py-2.5 text-right font-mono text-foreground text-sm tabular-nums">
                     ₹{Number(row["charges"] || 0).toLocaleString("en-IN")}
-                  </td>
+                  </td> */}
                 </tr>
               </tfoot>
             </table>

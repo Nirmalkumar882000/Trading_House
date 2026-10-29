@@ -81,6 +81,9 @@ function graded(data: Data, tab: Tab): Map<string, number> {
 interface SplitItem {
   size: number;
   qty: number;
+  packs?: number;
+  poId?: string;
+  buyer?: string;
 }
 
 export function PackingPage({ mod }: { mod: ModuleDef }) {
@@ -253,19 +256,80 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
     setSplitProduct(product);
     setSplitRemaining(remaining);
     setSplitTargetPo(targetPoId);
-    // Initialize default split lines: half in 250 G, half in 500 G or 1 KG
-    const half = round(remaining / 2);
-    setSplits([
-      { size: 0.25, qty: half },
-      { size: 0.5, qty: round(remaining - half) },
-    ]);
+
+    // Find pending demands for this product
+    const demands = buyerAllocations.filter(
+      (b) => b.product.toLowerCase() === product.toLowerCase() && b.balanceKg > 0
+    );
+    const top = demands[0];
+
+    if (top) {
+      // Pre-fill top demand: 250 G - 25 packs (or actual balance)
+      const topSize = top.packSizeKg > 0 ? top.packSizeKg : 0.25;
+      const topPacks = top.balancePacks > 0 ? top.balancePacks : 25;
+      const topQty = round(Math.min(remaining, topPacks * topSize));
+      const actualPacks = topSize > 0 ? Math.ceil(topQty / topSize) : topPacks;
+      const rem = Math.max(0, round(remaining - topQty));
+
+      const linesArr: SplitItem[] = [
+        {
+          size: topSize,
+          packs: actualPacks,
+          qty: topQty,
+          poId: top.poId,
+          buyer: top.buyer,
+        },
+      ];
+
+      if (rem > 0) {
+        const next = demands[1];
+        if (next) {
+          const nextSize = next.packSizeKg > 0 ? next.packSizeKg : 0.5;
+          const nextPacks = Math.min(next.balancePacks || 50, Math.ceil(rem / nextSize));
+          const nextQty = round(Math.min(rem, nextPacks * nextSize));
+          linesArr.push({
+            size: nextSize,
+            packs: nextPacks,
+            qty: nextQty,
+            poId: next.poId,
+            buyer: next.buyer,
+          });
+        } else {
+          const defSize = 0.5;
+          const defPacks = Math.ceil(rem / defSize);
+          linesArr.push({
+            size: defSize,
+            packs: defPacks,
+            qty: rem,
+            poId: "",
+            buyer: "",
+          });
+        }
+      }
+
+      setSplits(linesArr);
+      setSplitTargetPo(top.poId);
+    } else {
+      // Default: 250 G (25 packs = 6.25 kg) + remainder in 500 G
+      const defSize = 0.25;
+      const defPacks = Math.min(25, Math.max(1, Math.floor(remaining / defSize)));
+      const defQty = round(defPacks * defSize);
+      const rem = Math.max(0, round(remaining - defQty));
+      const nextSize = 0.5;
+      const nextPacks = nextSize > 0 ? Math.ceil(rem / nextSize) : 0;
+
+      setSplits([
+        { size: defSize, packs: defPacks, qty: defQty, poId: targetPoId },
+        { size: nextSize, packs: nextPacks, qty: rem, poId: "" },
+      ]);
+    }
   };
 
   const handleApplySplit = () => {
     if (!splitProduct) return;
     const totalAllocated = splits.reduce((sum, s) => sum + num(s.qty), 0);
     if (totalAllocated <= 0) {
-      toast.error("Enter quantities for the package split");
+      toast.error("Enter quantities or bag counts for the package split");
       return;
     }
     if (totalAllocated > splitRemaining + 0.001) {
@@ -294,16 +358,24 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
       const sp = validSplits[i]!;
       const maxIdNum = Math.max(1000, ...currentPacking.map((r) => Number(r.id.split("-")[1]) || 0));
       const newId = `PK-${maxIdNum + 1}`;
+      const linePoId = sp.poId !== undefined && sp.poId !== "" ? sp.poId : splitTargetPo;
+      const lineTargetPo = linePoId ? (data["purchase-orders"] ?? []).find((p) => p.id === linePoId) : null;
+      const lineBuyerName = lineTargetPo
+        ? String(lineTargetPo["buyer"] || "")
+        : sp.buyer || (splitTargetPo && targetPo ? buyerName : "");
+      const packsCount = sp.packs || (sp.size > 0 ? Math.ceil(sp.qty / sp.size) : 1);
+
       const row = normalize("packing", {
         id: newId,
         status: "Packed",
         date: dateStr,
-        po: splitTargetPo,
-        buyer: buyerName,
+        po: linePoId,
+        buyer: lineBuyerName,
         stage: tab.stage,
         grade: tab.grade,
         packer: packer.trim(),
         packSize: sp.size,
+        packs: packsCount,
         item: JSON.stringify([{ p: splitProduct, q: sp.qty }]),
       } as Row);
 
@@ -1017,36 +1089,112 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
               </button>
             </div>
 
-            {/* Buyer Target Selector for Split Lots */}
-            <div className="space-y-1">
-              <label className="text-xs font-semibold text-muted-foreground block">
-                Allocate Split Lots to Buyer Demand:
-              </label>
-              <select
-                value={splitTargetPo}
-                onChange={(e) => setSplitTargetPo(e.target.value)}
-                className="h-9 w-full rounded-md border bg-background px-3 text-xs font-medium outline-none focus:ring-2 focus:ring-primary/20"
-              >
-                <option value="">📦 General Sales Stock (Unassigned)</option>
-                {buyerAllocations
-                  .filter((b) => b.product.toLowerCase() === splitProduct.toLowerCase())
-                  .map((b) => (
-                    <option key={b.poId} value={b.poId}>
-                      👤 {b.buyer} · {b.poId} (Demand: {b.demandKg} kg · Bal: {b.balanceKg} kg)
-                    </option>
-                  ))}
-              </select>
-            </div>
-
-            {/* Split Balance Summary Card */}
+            {/* Buyer Target & Top Demand Quick Fill */}
             {(() => {
+              const productBuyerDemands = buyerAllocations.filter(
+                (b) => b.product.toLowerCase() === splitProduct.toLowerCase() && b.balanceKg > 0
+              );
+              const topDemand = productBuyerDemands[0];
               const allocated = splits.reduce((sum, s) => sum + num(s.qty), 0);
               const unallocated = round(splitRemaining - allocated);
-              const totalBags = splits.reduce((sum, s) => sum + (s.size > 0 ? Math.ceil(num(s.qty) / s.size) : 0), 0);
+              const totalBags = splits.reduce((sum, s) => sum + (s.packs !== undefined ? s.packs : (s.size > 0 ? Math.ceil(num(s.qty) / s.size) : 0)), 0);
               const isOver = unallocated < -0.001;
 
               return (
-                <div className="space-y-3">
+                <div className="space-y-4">
+                  {/* Top Buyer Demand Highlight Banner */}
+                  {topDemand ? (
+                    <div className="rounded-xl border border-primary/30 bg-primary/5 p-3 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-1.5 text-xs font-bold text-foreground">
+                            <Sparkles className="size-3.5 text-primary" />
+                            <span>Top Buyer Demand: {topDemand.buyer} ({topDemand.poId})</span>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mt-0.5">
+                            Pending Order: <b className="text-primary">{topDemand.packSizeLabel || "250 G"}</b> — <b className="text-foreground">{topDemand.balancePacks || 25} Packs</b> ({kg(topDemand.balanceKg)})
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="default"
+                          onClick={() => {
+                            const sz = topDemand.packSizeKg > 0 ? topDemand.packSizeKg : 0.25;
+                            const pCount = topDemand.balancePacks > 0 ? topDemand.balancePacks : 25;
+                            const weight = round(pCount * sz);
+                            const remKg = Math.max(0, round(splitRemaining - weight));
+                            const newSplits: SplitItem[] = [
+                              { size: sz, packs: pCount, qty: weight, poId: topDemand.poId, buyer: topDemand.buyer },
+                            ];
+                            if (remKg > 0) {
+                              newSplits.push({
+                                size: 0.5,
+                                packs: Math.ceil(remKg / 0.5),
+                                qty: remKg,
+                                poId: "",
+                                buyer: "",
+                              });
+                            }
+                            setSplits(newSplits);
+                            setSplitTargetPo(topDemand.poId);
+                            toast.success(`Applied top demand: ${formatBagSize(sz)} × ${pCount} Packs (${weight} kg) for ${topDemand.buyer}`);
+                          }}
+                          className="h-7 text-xs font-semibold gap-1 bg-primary text-primary-foreground shadow-xs shrink-0"
+                        >
+                          <Zap className="size-3 fill-current" /> Fill Top Demand ({topDemand.packSizeLabel || "250 G"} - {topDemand.balancePacks || 25} Pack)
+                        </Button>
+                      </div>
+
+                      {/* Other Pending Demands */}
+                      {productBuyerDemands.length > 1 && (
+                        <div className="flex flex-wrap items-center gap-1.5 border-t border-primary/10 pt-2 text-[11px]">
+                          <span className="text-muted-foreground font-semibold">Other Demands:</span>
+                          {productBuyerDemands.slice(1).map((b) => (
+                            <button
+                              key={b.poId}
+                              type="button"
+                              onClick={() => {
+                                const sz = b.packSizeKg > 0 ? b.packSizeKg : 0.5;
+                                const pCount = b.balancePacks > 0 ? b.balancePacks : 10;
+                                const weight = round(pCount * sz);
+                                setSplits((prev) => [
+                                  ...prev,
+                                  { size: sz, packs: pCount, qty: weight, poId: b.poId, buyer: b.buyer },
+                                ]);
+                                toast.success(`Added split line: ${b.buyer} (${formatBagSize(sz)} × ${pCount} packs)`);
+                              }}
+                              className="inline-flex items-center gap-1 rounded-md bg-background border px-2 py-0.5 font-medium text-foreground hover:bg-primary/10 hover:text-primary transition-colors"
+                            >
+                              <span>+ {b.buyer}: {b.packSizeLabel} ({b.balancePacks} pkts)</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-muted-foreground block">
+                        Allocate Split Lots to Buyer Demand:
+                      </label>
+                      <select
+                        value={splitTargetPo}
+                        onChange={(e) => setSplitTargetPo(e.target.value)}
+                        className="h-9 w-full rounded-md border bg-background px-3 text-xs font-medium outline-none focus:ring-2 focus:ring-primary/20"
+                      >
+                        <option value="">📦 General Sales Stock (Unassigned)</option>
+                        {buyerAllocations
+                          .filter((b) => b.product.toLowerCase() === splitProduct.toLowerCase())
+                          .map((b) => (
+                            <option key={b.poId} value={b.poId}>
+                              👤 {b.buyer} · {b.poId} (Demand: {b.demandKg} kg · Bal: {b.balanceKg} kg)
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Split Balance Summary Card */}
                   <div className="grid grid-cols-3 gap-3 rounded-xl bg-muted/40 p-3 text-center border">
                     <div>
                       <p className="text-[11px] font-semibold text-muted-foreground">Available to Split</p>
@@ -1067,26 +1215,36 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                   </div>
 
                   {/* Split Lines Editor */}
-                  <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
-                    <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                      Package Split Lines ({splits.length} sizes)
-                    </p>
+                  <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                        Package Split Lines ({splits.length} sizes) — Enter Bag Size & Pack Count
+                      </p>
+                      <span className="text-[10px] text-primary font-medium">
+                        Direct bag count input (Auto-computes KG)
+                      </span>
+                    </div>
+
                     {splits.map((s, idx) => {
-                      const lineBags = s.size > 0 && s.qty > 0 ? Math.ceil(s.qty / s.size) : 0;
+                      const linePacks = s.packs !== undefined ? s.packs : (s.size > 0 && s.qty > 0 ? Math.ceil(s.qty / s.size) : 0);
                       return (
-                        <div key={idx} className="flex items-center gap-2.5 rounded-xl border bg-background p-2.5 shadow-sm">
+                        <div key={idx} className="flex flex-wrap items-center gap-2 rounded-xl border bg-background p-2.5 shadow-xs">
                           {/* Bag size selector */}
-                          <div className="flex-1">
-                            <label className="text-[10px] font-semibold text-muted-foreground block">Bag Size</label>
+                          <div className="w-32">
+                            <label className="text-[10px] font-semibold text-muted-foreground block mb-0.5">Bag Size</label>
                             <select
                               value={String(s.size)}
                               onChange={(e) => {
-                                const val = Number(e.target.value);
+                                const newSize = Number(e.target.value);
                                 setSplits((prev) =>
-                                  prev.map((item, i) => (i === idx ? { ...item, size: val } : item))
+                                  prev.map((item, i) => {
+                                    if (i !== idx) return item;
+                                    const currentPacks = item.packs !== undefined ? item.packs : (newSize > 0 ? Math.ceil(item.qty / newSize) : 0);
+                                    return { ...item, size: newSize, qty: round(currentPacks * newSize) };
+                                  })
                                 );
                               }}
-                              className="h-8 w-full rounded-md border bg-background px-2 text-xs font-medium outline-none"
+                              className="h-8 w-full rounded-md border bg-background px-2 text-xs font-semibold outline-none focus:ring-1 focus:ring-primary"
                             >
                               {STANDARD_BAG_SIZES.map((opt) => (
                                 <option key={opt.label} value={String(opt.value)}>
@@ -1096,29 +1254,94 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                             </select>
                           </div>
 
-                          {/* Split Quantity in KG */}
+                          {/* Bag / Pack Count (PRIMARY INPUT) */}
                           <div className="w-28">
-                            <label className="text-[10px] font-semibold text-muted-foreground block">Pack KG</label>
-                            <input
-                              type="number"
-                              step="any"
-                              min={0}
-                              value={s.qty || ""}
-                              placeholder="0"
-                              onChange={(e) => {
-                                const val = Number(e.target.value);
-                                setSplits((prev) =>
-                                  prev.map((item, i) => (i === idx ? { ...item, qty: val } : item))
-                                );
-                              }}
-                              className="h-8 w-full rounded-md border bg-background px-2 text-xs font-mono outline-none"
-                            />
+                            <label className="text-[10px] font-bold text-primary block mb-0.5">
+                              Bag Count
+                            </label>
+                            <div className="inline-flex items-center gap-1 w-full">
+                              <input
+                                type="number"
+                                min={0}
+                                step={1}
+                                value={linePacks || ""}
+                                placeholder="e.g. 25"
+                                onChange={(e) => {
+                                  const count = Math.max(0, Math.floor(Number(e.target.value)));
+                                  setSplits((prev) =>
+                                    prev.map((item, i) => {
+                                      if (i !== idx) return item;
+                                      return {
+                                        ...item,
+                                        packs: count,
+                                        qty: round(count * item.size),
+                                      };
+                                    })
+                                  );
+                                }}
+                                className="h-8 w-full rounded-md border bg-background px-2 font-mono font-bold text-xs text-primary outline-none focus:ring-1 focus:ring-primary"
+                              />
+                              <span className="text-[11px] text-muted-foreground font-semibold">pkts</span>
+                            </div>
                           </div>
 
-                          {/* Calculated Bags */}
-                          <div className="w-24 text-center">
-                            <p className="text-[10px] font-semibold text-muted-foreground">Bags</p>
-                            <p className="text-xs font-bold text-primary">{lineBags} bags</p>
+                          {/* Pack KG (Bidirectional) */}
+                          <div className="w-24">
+                            <label className="text-[10px] font-semibold text-muted-foreground block mb-0.5">Pack KG</label>
+                            <div className="inline-flex items-center gap-1 w-full">
+                              <input
+                                type="number"
+                                step="any"
+                                min={0}
+                                value={s.qty || ""}
+                                placeholder="0"
+                                onChange={(e) => {
+                                  const val = Number(e.target.value);
+                                  setSplits((prev) =>
+                                    prev.map((item, i) => {
+                                      if (i !== idx) return item;
+                                      const calculatedPacks = item.size > 0 ? Math.ceil(val / item.size) : 0;
+                                      return {
+                                        ...item,
+                                        qty: val,
+                                        packs: calculatedPacks,
+                                      };
+                                    })
+                                  );
+                                }}
+                                className="h-8 w-full rounded-md border bg-background px-2 text-xs font-mono outline-none focus:ring-1 focus:ring-primary"
+                              />
+                              <span className="text-[11px] text-muted-foreground">kg</span>
+                            </div>
+                          </div>
+
+                          {/* Target Buyer Selector */}
+                          <div className="flex-1 min-w-[130px]">
+                            <label className="text-[10px] font-semibold text-muted-foreground block mb-0.5">Allocated Buyer</label>
+                            <select
+                              value={s.poId || ""}
+                              onChange={(e) => {
+                                const poVal = e.target.value;
+                                const poObj = (data["purchase-orders"] ?? []).find((p) => p.id === poVal);
+                                setSplits((prev) =>
+                                  prev.map((item, i) =>
+                                    i === idx
+                                      ? { ...item, poId: poVal, buyer: poObj ? String(poObj["buyer"] || "") : "" }
+                                      : item
+                                  )
+                                );
+                              }}
+                              className="h-8 w-full rounded-md border bg-background px-2 text-xs font-medium outline-none focus:ring-1 focus:ring-primary"
+                            >
+                              <option value="">📦 General Stock</option>
+                              {buyerAllocations
+                                .filter((b) => b.product.toLowerCase() === splitProduct.toLowerCase())
+                                .map((b) => (
+                                  <option key={b.poId} value={b.poId}>
+                                    👤 {b.buyer} ({b.poId})
+                                  </option>
+                                ))}
+                            </select>
                           </div>
 
                           {/* Remove Split Line */}
@@ -1126,7 +1349,8 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                             <button
                               type="button"
                               onClick={() => setSplits((prev) => prev.filter((_, i) => i !== idx))}
-                              className="rounded p-1 text-destructive hover:bg-destructive/10"
+                              className="rounded p-1 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors mt-3"
+                              title="Remove split line"
                             >
                               <Trash2 className="size-4" />
                             </button>
@@ -1141,8 +1365,13 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                     variant="outline"
                     size="sm"
                     onClick={() => {
-                      // Suggest the next size (e.g. 1 KG or 2 KG)
-                      setSplits((prev) => [...prev, { size: 1.0, qty: Math.max(0, unallocated) }]);
+                      const nextSize = 0.5;
+                      const remainingKg = Math.max(0, unallocated);
+                      const packsCount = nextSize > 0 ? Math.ceil(remainingKg / nextSize) : 0;
+                      setSplits((prev) => [
+                        ...prev,
+                        { size: nextSize, packs: packsCount, qty: remainingKg, poId: "" },
+                      ]);
                     }}
                     className="w-full text-xs gap-1 border-dashed"
                   >
@@ -1154,6 +1383,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                     <div className="text-xs">
                       <span className="text-muted-foreground">Total Output: </span>
                       <strong className="text-foreground">{totalBags} bags</strong>
+                      <span className="text-muted-foreground ml-1">({kg(allocated)})</span>
                     </div>
                     <div className="flex gap-2">
                       <Button variant="ghost" size="sm" onClick={() => setSplitProduct(null)}>

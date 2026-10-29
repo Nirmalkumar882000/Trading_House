@@ -10,7 +10,7 @@ export interface ProductItem {
   category?: string;
 }
 
-export const PRODUCT_CATALOG: ProductItem[] = [
+export const INITIAL_PRODUCT_CATALOG: ProductItem[] = [
   { name: "Amaranth Green Leaves (Arai Keerai)", defaultPackSize: "250 g", packSizeKg: 0.25, category: "Greens" },
   { name: "Amaranth Red Leaves (Red Mulai Keerai)", defaultPackSize: "150 g", packSizeKg: 0.15, category: "Greens" },
   { name: "Banana Elaichi (Yelakki)", defaultPackSize: "450 g - 550 g", packSizeKg: 0.5, category: "Fruits" },
@@ -50,8 +50,35 @@ export const PRODUCT_CATALOG: ProductItem[] = [
   { name: "Banana", defaultPackSize: "500 g", packSizeKg: 0.5, category: "Staples" },
 ];
 
+export const PRODUCT_CATALOG: ProductItem[] = [...INITIAL_PRODUCT_CATALOG];
+
 export const ITEMS: string[] = PRODUCT_CATALOG.map((p) => p.name);
 export const PRODUCTS: string[] = ITEMS;
+
+export function syncProductCatalog(newCatalog: ProductItem[]): void {
+  PRODUCT_CATALOG.length = 0;
+  PRODUCT_CATALOG.push(...newCatalog);
+  ITEMS.length = 0;
+  for (const item of newCatalog) {
+    ITEMS.push(item.name);
+  }
+}
+
+export const WAREHOUSES = [
+  "Main Warehouse (Koyambedu)",
+  "North Depot (Madhavaram)",
+  "South Hub (Tambaram)",
+];
+
+export const DEFAULT_WAREHOUSE = WAREHOUSES[0];
+
+export function detectUnitType(packSize?: string): "kg" | "piece" | "range" {
+  if (!packSize) return "kg";
+  const s = packSize.toLowerCase();
+  if (s.includes("pc")) return "piece";
+  if (s.includes("-") || s.includes("–")) return "range";
+  return "kg";
+}
 
 export interface PackSpecOption {
   label: string;
@@ -144,6 +171,18 @@ export interface ModuleDef {
   seed: Record<string, unknown>[];
 }
 
+export function totalPacketCount(row: Row): number {
+  const ls = parseLines(row["item"]);
+  return ls.reduce((sum, l) => {
+    const spec =
+      PRODUCT_CATALOG.find((item) => item.name.toLowerCase() === l.p.toLowerCase()) ||
+      PRODUCT_CATALOG.find((item) => item.name.toLowerCase().includes(l.p.toLowerCase())) ||
+      { packSizeKg: 1.0 };
+    const packSizeKg = l.packKg ?? (spec.packSizeKg > 0 ? spec.packSizeKg : 1.0);
+    return sum + Math.ceil(l.q / packSizeKg);
+  }, 0);
+}
+
 export const STAGES = [
   "A · Setup",
   "B · Buyer demand",
@@ -208,6 +247,13 @@ const BASE_MODULES: ModuleDef[] = [
   },
   // B · demand first
   {
+    slug: "product-catalog", title: "Add Catalog", stage: STAGES[1], flows: "F13", prefix: "CAT",
+    description: "Product catalog master with default pack sizes, KG weights, and categories for Buyer Purchase Orders.",
+    statuses: ["Active"],
+    fields: [],
+    seed: [],
+  },
+  {
     slug: "purchase-orders", title: "Buyer - Purchase Order", stage: STAGES[1], flows: "F13", prefix: "PO",
     description: "Step 1 — buyers raise demand first. Market purchase is planned against these POs. POs received from the Buyer Portal or entered manually; both flow into sales orders.",
     statuses: ["Received", "Accepted", "Converted", "Rejected"],
@@ -216,7 +262,7 @@ const BASE_MODULES: ModuleDef[] = [
       { key: "buyer", label: "Buyer", type: "select", options: BUYERS, list: true, required: true },
       { key: "source", label: "Source", type: "select", options: ["Buyer Portal", "Manual"], list: true },
       { key: "item", label: "Products", type: "products", options: ITEMS, list: true },
-      { key: "extraKg", label: "Extra KG", type: "number", suffix: "kg", list: true },
+      { key: "extraKg", label: "Extra KG", type: "number", suffix: "kg" },
       { key: "qty", label: "Qty", type: "number", suffix: "kg", list: true },
       { key: "deliveryDate", label: "Delivery date", type: "date" },
     ],
@@ -594,7 +640,10 @@ const BASE_MODULES: ModuleDef[] = [
 
 export const MODULES = configureModules(BASE_MODULES, ITEMS);
 
-export const getModule = (slug: string) => MODULES.find((m) => m.slug === slug);
+export const getModule = (slug: string) => {
+  if (slug === "catalog") return MODULES.find((m) => m.slug === "product-catalog");
+  return MODULES.find((m) => m.slug === slug);
+};
 
 export function seedRows(m: ModuleDef): Row[] {
   return m.seed.map((r, i) => ({ ...r, id: (r.id as string) || `${m.prefix}-${1001 + i}` }) as unknown as Row);

@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { MODULES, seedRows, type Row } from "./modules";
+import { MODULES, seedRows, type Row, INITIAL_PRODUCT_CATALOG, syncProductCatalog, type ProductItem } from "./modules";
 import { normalize, syncReceiptContainers, syncReceiptDownstream } from "./workflow";
 import type { UserRole } from "./rbac";
 
@@ -7,6 +7,22 @@ type Data = Record<string, Row[]>;
 const STORAGE_KEY = "trading-house-data";
 const ROLE_STORAGE_KEY = "trading-house-role";
 const CLEAN_VERSION_KEY = "trading-house-portal-clean-v9";
+const CATALOG_STORAGE_KEY = "trading-house-product-catalog";
+
+const loadCatalog = (): ProductItem[] => {
+  try {
+    const raw = localStorage.getItem(CATALOG_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        syncProductCatalog(parsed);
+        return parsed;
+      }
+    }
+  } catch { /* ignore */ }
+  syncProductCatalog(INITIAL_PRODUCT_CATALOG);
+  return [...INITIAL_PRODUCT_CATALOG];
+};
 
 // Default demo initial data with rich produce records, clean quantities and packet counts
 const initial = (): Data => Object.fromEntries(MODULES.map((m) => [m.slug, []]));
@@ -62,6 +78,11 @@ interface Ctx {
   data: Data;
   role: UserRole;
   setRole: (role: UserRole) => void;
+  catalog: ProductItem[];
+  addCatalogItem: (item: ProductItem) => void;
+  updateCatalogItem: (originalName: string, item: ProductItem) => void;
+  deleteCatalogItem: (name: string) => void;
+  resetCatalog: () => void;
   upsert: (slug: string, row: Row) => void;
   remove: (slug: string, id: string) => void;
   clearModule: (slug: string) => void;
@@ -76,10 +97,12 @@ const StoreCtx = createContext<Ctx | null>(null);
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<Data>(initial);
   const [role, setRoleState] = useState<UserRole>("Admin");
+  const [catalog, setCatalogState] = useState<ProductItem[]>(loadCatalog);
   const hydrated = useRef(false);
 
   useEffect(() => {
     setData(load());
+    setCatalogState(loadCatalog());
     try {
       const savedRole = localStorage.getItem(ROLE_STORAGE_KEY) as UserRole | null;
       if (savedRole) setRoleState(savedRole);
@@ -99,10 +122,58 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     try { localStorage.setItem(ROLE_STORAGE_KEY, r); } catch { /* ignore */ }
   };
 
+  const addCatalogItem = (item: ProductItem) => {
+    setCatalogState((prev) => {
+      const filtered = prev.filter((p) => p.name.trim().toLowerCase() !== item.name.trim().toLowerCase());
+      const next = [item, ...filtered];
+      syncProductCatalog(next);
+      try {
+        localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify(next));
+      } catch { /* ignore */ }
+      return next;
+    });
+  };
+
+  const updateCatalogItem = (originalName: string, item: ProductItem) => {
+    setCatalogState((prev) => {
+      const next = prev.map((p) => (p.name.trim().toLowerCase() === originalName.trim().toLowerCase() ? item : p));
+      syncProductCatalog(next);
+      try {
+        localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify(next));
+      } catch { /* ignore */ }
+      return next;
+    });
+  };
+
+  const deleteCatalogItem = (name: string) => {
+    setCatalogState((prev) => {
+      const next = prev.filter((p) => p.name.trim().toLowerCase() !== name.trim().toLowerCase());
+      syncProductCatalog(next);
+      try {
+        localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify(next));
+      } catch { /* ignore */ }
+      return next;
+    });
+  };
+
+  const resetCatalog = () => {
+    const resetList = [...INITIAL_PRODUCT_CATALOG];
+    setCatalogState(resetList);
+    syncProductCatalog(resetList);
+    try {
+      localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify(resetList));
+    } catch { /* ignore */ }
+  };
+
   const value: Ctx = {
     data,
     role,
     setRole,
+    catalog,
+    addCatalogItem,
+    updateCatalogItem,
+    deleteCatalogItem,
+    resetCatalog,
     upsert: (slug, row) =>
       setData((d) => {
         const list = d[slug] ?? [];
@@ -172,6 +243,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(demo));
       } catch { /* ignore */ }
       setData(demo);
+      resetCatalog();
       setRole("Admin");
     },
     seedDemoData: () => {

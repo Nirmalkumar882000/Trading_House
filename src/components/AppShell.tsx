@@ -5,7 +5,7 @@ import {
   Package, ScanSearch, Boxes, Truck, Wallet, Warehouse, Store, Users, UserCog,
   Building2, BarChart3, Route, Tags, Container, ArrowRightLeft, StickyNote,
   Receipt, ClipboardCheck, Undo2, FileText, BadgeIndianRupee, CalendarCheck,
-  History, Workflow, ShieldAlert, X, Menu, Trash2, RotateCcw,
+  History, Workflow, ShieldAlert, X, Menu, Trash2, RotateCcw, BookOpen,
   ChevronRight, ChevronLeft, ArrowRight, ArrowLeft,
   type LucideIcon,
 } from "lucide-react";
@@ -59,6 +59,7 @@ const RAIL_GROUPS: RailGroup[] = [
     tooltip: "Buyer Demand",
     icon: ClipboardList,
     modules: [
+      // { slug: "product-catalog", title: "Buyer Product Catalog", icon: BookOpen },
       { slug: "purchase-orders", title: "Buyer - Purchase Order", icon: ClipboardList },
       { slug: "demand-plan", title: "Demand Consolidation Plan", icon: BarChart3 },
     ],

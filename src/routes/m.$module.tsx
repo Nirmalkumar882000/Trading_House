@@ -12,6 +12,7 @@ import { ProcessFlowMap } from "@/components/ProcessFlowMap";
 import { BusinessProfilePage } from "@/components/BusinessProfilePage";
 import { ReportsSuite } from "@/components/ReportsSuite";
 import { LedgersPage } from "@/components/LedgersPage";
+import { ProductCatalogPage } from "@/components/ProductCatalogPage";
 
 export const Route = createFileRoute("/m/$module")({
   loader: ({ params }) => {
@@ -47,6 +48,7 @@ function ModuleRoute() {
   if (slug === "financial-ledgers") return <LedgersPage mod={mod} />;
   if (slug === "ai-sourcing") return <SourcingPage mod={mod} />;
   if (["inventory", "stock-movements"].includes(slug)) return <StockPage key={slug} mod={mod} />;
+  if (slug === "product-catalog" || slug === "catalog") return <ProductCatalogPage mod={mod} />;
   if (slug === "demand-plan") return <DemandPlan mod={mod} />;
   if (slug === "quality-check") return <QualityPage mod={mod} />;
   if (slug === "packing") return <PackingPage mod={mod} />;

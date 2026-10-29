@@ -1,6 +1,7 @@
-import { X, MessageCircle, FileText, CheckCircle2, Package, Calendar, User } from "lucide-react";
+import { X, MessageCircle, CheckCircle2, Package, Calendar, User } from "lucide-react";
 import { Button } from "./ui/button";
 import { type Row, PRODUCT_CATALOG } from "@/lib/modules";
+import { useStore } from "@/lib/store";
 import { parseLines } from "@/lib/workflow";
 import { StatusBadge } from "./StatusBadge";
 
@@ -11,6 +12,7 @@ interface BuyerDemandModalProps {
 }
 
 export function BuyerDemandModal({ isOpen, onClose, row }: BuyerDemandModalProps) {
+  const { catalog } = useStore();
   if (!isOpen || !row) return null;
 
   const lines = parseLines(row["item"]);
@@ -23,7 +25,9 @@ export function BuyerDemandModal({ isOpen, onClose, row }: BuyerDemandModalProps
 
   // Calculate packet breakdown based on product catalog
   const breakdown = lines.map((l) => {
-    const spec = PRODUCT_CATALOG.find((item) => item.name.toLowerCase() === l.p.toLowerCase()) ||
+    const spec = catalog.find((item) => item.name.toLowerCase() === l.p.toLowerCase()) ||
+                 catalog.find((item) => item.name.toLowerCase().includes(l.p.toLowerCase())) ||
+                 PRODUCT_CATALOG.find((item) => item.name.toLowerCase() === l.p.toLowerCase()) ||
                  PRODUCT_CATALOG.find((item) => item.name.toLowerCase().includes(l.p.toLowerCase())) ||
                  { defaultPackSize: "1 kg", packSizeKg: 1.0, category: "Vegetables" };
 

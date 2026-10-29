@@ -29,6 +29,7 @@ export function GoodsReceiptVoucherModal({
   const dcNo = String(receipt["dc"] || "TRP-1001");
   const date = String(receipt["date"] || new Date().toISOString().split("T")[0]);
   const supervisor = String(receipt["person"] || receipt["responsible"] || "Ravi Kumar");
+  const warehouse = String(receipt["warehouse"] || trip?.["warehouse"] || "Main Warehouse (Koyambedu)");
   const transporter = String(trip?.["transporter"] || "Chennai Fresh Logistics");
   const vehicle = String(trip?.["vehicle"] || "TN 09 AB 1234");
   const driver = String(trip?.["driver"] || "Raja");
@@ -92,8 +93,8 @@ export function GoodsReceiptVoucherModal({
             <span className="font-medium text-foreground">{date}</span>
           </div>
           <div>
-            <span className="text-[10px] text-muted-foreground block uppercase font-medium">Receiving Bay</span>
-            <span className="font-medium text-foreground">Bay #02 · Chennai Hub</span>
+            <span className="text-[10px] text-muted-foreground block uppercase font-medium">Receiving Warehouse</span>
+            <span className="font-semibold text-foreground truncate block" title={warehouse}>{warehouse}</span>
           </div>
         </div>
 

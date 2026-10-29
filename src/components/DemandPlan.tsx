@@ -9,10 +9,10 @@ import {
   Download,
   Info,
   ShieldAlert,
-  CheckCircle2,
   Package,
   Layers,
-  Eye,
+  Pencil,
+  Minus,
   X,
   PlusCircle,
   Truck,
@@ -78,8 +78,11 @@ interface InwardReturnItem {
   returnCount: number;
 }
 
+// Step size (kg) for the quick +/- buffer stepper on the consolidation table.
+const BUFFER_STEP = 5;
+
 export function DemandPlan({ mod }: { mod: ModuleDef }) {
-  const { data, upsert, nextId } = useStore();
+  const { data, upsert, nextId, catalog } = useStore();
   const navigate = useNavigate();
 
   const [search, setSearch] = useState("");
@@ -707,6 +710,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
         sendWhatsAppForInwardReturn(normalizedMovement, returnItems);
       }
 
+      setTransportFilterTab("Inward Return");
       setIsTripModalOpen(false);
       setSelectedProducts(new Set());
       return;
@@ -953,6 +957,22 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     setEditingPoBuffer(null);
   };
 
+  // Quick +/- stepper on the consolidation table — adjusts a contributing PO's buffer.
+  // Increments land on the first PO; decrements target whichever PO currently holds
+  // the largest buffer so the button never no-ops on a zero-buffer PO.
+  const handleAdjustProductBuffer = (plan: ProductPlan, delta: number) => {
+    const poIds = Array.from(new Set(plan.buyers.flatMap((b) => b.pos)));
+    const pos = poIds
+      .map((id) => (data["purchase-orders"] ?? []).find((x) => x.id === id))
+      .filter((x): x is Row => !!x);
+    const [first, ...rest] = pos;
+    if (!first) return;
+    const target =
+      delta < 0 ? rest.reduce((a, b) => ((Number(b["extraKg"]) || 0) > (Number(a["extraKg"]) || 0) ? b : a), first) : first;
+    const currentExtra = Number(target["extraKg"]) || 0;
+    handleSavePoBuffer(target.id, Math.max(0, round(currentExtra + delta)));
+  };
+
   // All Transport Movements with enriched supplier, buyer & product details
   const allTransportMovements = useMemo(() => {
     const list = data["transport"] ?? [];
@@ -1091,12 +1111,6 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
           >
             <Share2 className="size-3.5" /> WhatsApp Mandi Sheet
           </Button>
-          <Button
-            onClick={handleOpenDefaultTripModal}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3.5 py-2 text-xs font-semibold text-primary-foreground shadow-xs hover:opacity-90"
-          >
-            <ShoppingCart className="size-3.5" /> Plan Market Trip
-          </Button>
         </div>
       </div>
 
@@ -1135,6 +1149,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             Aggregated contingency buffer across accepted buyer POs
           </p>
         </div>
+
 
         {/* Purchased in Market */}
         <div className="rounded-xl border bg-card p-4 shadow-card">
@@ -1213,51 +1228,15 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {selectedProducts.size > 0 ? (
-            <>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => handleWhatsAppProcurementSheet(true)}
-                className="h-8 text-xs font-medium bg-card text-emerald-700 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
-              >
-                <Share2 className="size-3.5 mr-1" /> WhatsApp Selected
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => openPlanTripModal(plans.filter((p) => selectedProducts.has(p.product)), "Inward")}
-                className="h-8 bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95"
-              >
-                <ShoppingCart className="size-3.5 mr-1.5" /> Plan Market Trip for Selected ({selectedProducts.size})
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setSelectedProducts(new Set())}
-                className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
-              >
-                Clear
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => handleWhatsAppProcurementSheet(false)}
-                className="h-8 text-xs font-medium bg-card text-emerald-700 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
-              >
-                <Share2 className="size-3.5 mr-1" /> WhatsApp Mandi Sheet
-              </Button>
-              <Button
-                size="sm"
-                onClick={handleOpenDefaultTripModal}
-                className="h-8 bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95"
-              >
-                <ShoppingCart className="size-3.5 mr-1.5" /> Plan Market Trip
-              </Button>
-            </>
-          )}
+          <Button
+            size="sm"
+            onClick={() => openPlanTripModal(plans.filter((p) => selectedProducts.has(p.product)), "Inward")}
+            disabled={selectedProducts.size === 0}
+            title={selectedProducts.size === 0 ? "Select products to plan a market trip" : undefined}
+            className="h-8 bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95"
+          >
+            <ShoppingCart className="size-3.5 mr-1.5" /> Plan Market Trip
+          </Button>
         </div>
       </div>
 
@@ -1336,15 +1315,12 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   ➕ Extra Buffer
                 </th>
                 <th className="px-4 py-3 text-right font-semibold">Total Demand</th>
-                <th className="px-4 py-3 text-right font-semibold">Purchased</th>
-                <th className="px-4 py-3 text-right font-semibold">Balance to Buy</th>
-                <th className="px-4 py-3 text-right font-semibold">Actions</th>
+                                                <th className="px-4 py-3 text-right font-semibold">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y">
               {filteredPlans.map((p) => {
                 const isSelected = selectedProducts.has(p.product);
-                const pct = p.demand ? Math.min(100, (p.purchased / p.demand) * 100) : 0;
 
                 return (
                   <tr
@@ -1398,15 +1374,35 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                       {p.baseDemand.toLocaleString("en-IN")} kg
                     </td>
 
-                    {/* Extra Buffer KG */}
-                    <td className="px-4 py-3 text-right tabular-nums">
-                      {p.extraKg > 0 ? (
-                        <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-700 dark:text-amber-400">
-                          +{p.extraKg.toLocaleString("en-IN")} kg
+                    {/* Extra Buffer KG — inline increment/decrement */}
+                    <td className="px-4 py-3">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleAdjustProductBuffer(p, -BUFFER_STEP)}
+                          disabled={p.extraKg <= 0}
+                          title={`Decrease buffer by ${BUFFER_STEP} kg`}
+                          className="flex size-6 shrink-0 items-center justify-center rounded-md border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-40 dark:text-amber-400"
+                        >
+                          <Minus className="size-3" />
+                        </button>
+                        <span
+                          className={cn(
+                            "min-w-16 text-center text-xs font-semibold tabular-nums",
+                            p.extraKg > 0 ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"
+                          )}
+                        >
+                          {p.extraKg > 0 ? `+${p.extraKg.toLocaleString("en-IN")} kg` : "— kg"}
                         </span>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
+                        <button
+                          type="button"
+                          onClick={() => handleAdjustProductBuffer(p, BUFFER_STEP)}
+                          title={`Increase buffer by ${BUFFER_STEP} kg`}
+                          className="flex size-6 shrink-0 items-center justify-center rounded-md border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
+                        >
+                          <Plus className="size-3" />
+                        </button>
+                      </div>
                     </td>
 
                     {/* Total Demand */}
@@ -1416,36 +1412,6 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                       </span>
                     </td>
 
-                    {/* Purchased in Market */}
-                    <td className="px-4 py-3 text-right tabular-nums">
-                      <p className="font-medium text-foreground">{p.purchased.toLocaleString("en-IN")} kg</p>
-                      <div className="ml-auto mt-1 h-1.5 w-24 overflow-hidden rounded-full bg-muted">
-                        <div
-                          className={cn("h-full transition-all", p.balance <= 0 ? "bg-emerald-500" : "bg-amber-500")}
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                    </td>
-
-                    {/* Balance to Buy */}
-                    <td
-                      className={cn(
-                        "px-4 py-3 text-right tabular-nums font-semibold",
-                        p.balance > 0 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"
-                      )}
-                    >
-                      {p.balance > 0 ? (
-                        <span className="rounded-md bg-amber-500/10 px-2 py-1 text-xs font-bold text-amber-700 dark:text-amber-400">
-                          {p.balance.toLocaleString("en-IN")} kg
-                        </span>
-                      ) : p.reserved > 0 ? (
-                        <span className="text-xs text-blue-600 font-medium">Planned in Trip</span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-xs text-emerald-600 font-semibold">
-                          <CheckCircle2 className="size-3" /> Fulfilled
-                        </span>
-                      )}
-                    </td>
 
                     {/* Action Buttons */}
                     <td className="px-4 py-3 text-right">
@@ -1455,9 +1421,9 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                           size="sm"
                           onClick={() => setSelectedProduct(p)}
                           className="h-8 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
-                          title="View buyers, PO breakdown & adjust buffer"
+                          title="Edit buyers, PO breakdown & buffer"
                         >
-                          <Eye className="size-3.5 mr-1" /> Details
+                          <Pencil className="size-3.5 mr-1" /> Edit
                         </Button>
                         {/* Plan trip button commented out as requested */}
                         {/* <Button
@@ -1480,7 +1446,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
               {!filteredPlans.length && (
                 <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center text-muted-foreground">
+                  <td colSpan={7} className="px-4 py-12 text-center text-muted-foreground">
                     {search ? `No products match "${search}".` : "No buyer demand found. Add buyer purchase orders first."}
                   </td>
                 </tr>
@@ -2231,13 +2197,13 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                       <thead className="bg-muted/60 text-muted-foreground font-semibold">
                         <tr>
                           <th className="px-3 py-2 text-left min-w-[180px]">Product</th>
-                          <th className="px-2 py-2 text-left min-w-[160px]">Supplier</th>
+                          {/* <th className="px-2 py-2 text-left min-w-[160px]">Supplier</th> */}
                           <th className="px-3 py-2 text-right">Total Demand</th>
-                          <th className="px-2 py-2 text-left">Container</th>
+                          {/* <th className="px-2 py-2 text-left">Container</th>
                           <th className="px-2 py-2 text-right">Box Count</th>
                           <th className="px-3 py-2 text-right">Procure KG</th>
                           <th className="px-3 py-2 text-right">Rate / KG (₹)</th>
-                          <th className="px-3 py-2 text-right">Amount (₹)</th>
+                          <th className="px-3 py-2 text-right">Amount (₹)</th> */}
                           <th className="px-2 py-2 text-center w-8"></th>
                         </tr>
                       </thead>
@@ -2257,7 +2223,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                                 ))}
                               </select>
                             </td>
-                            <td className="px-2 py-2.5 text-left">
+                            {/* <td className="px-2 py-2.5 text-left">
                               <select
                                 value={item.supplier}
                                 onChange={(e) => handleUpdateTripItemSupplier(idx, e.target.value)}
@@ -2269,11 +2235,11 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                                   </option>
                                 ))}
                               </select>
-                            </td>
+                            </td> */}
                             <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground font-semibold">
                               {item.totalDemand.toLocaleString("en-IN")} kg
                             </td>
-                            <td className="px-2 py-2.5 text-left">
+                            {/* <td className="px-2 py-2.5 text-left">
                               <select
                                 value={item.containerType}
                                 onChange={(e) => handleUpdateTripItemContainer(idx, e.target.value)}
@@ -2314,10 +2280,10 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                                 onChange={(e) => handleUpdateTripItemRate(idx, Number(e.target.value))}
                                 className="w-16 rounded-md border border-muted-foreground/30 bg-background px-2 py-1 text-right text-xs font-semibold tabular-nums outline-none focus:ring-1 focus:ring-primary"
                               />
-                            </td>
-                            <td className="px-3 py-2.5 text-right tabular-nums font-bold text-foreground">
+                            </td> */}
+                            {/* <td className="px-3 py-2.5 text-right tabular-nums font-bold text-foreground">
                               ₹{round(item.qty * (item.rate || 0)).toLocaleString("en-IN")}
-                            </td>
+                            </td> */}
                             <td className="px-2 py-2.5 text-center">
                               <button
                                 type="button"
@@ -2337,13 +2303,13 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                           <td className="px-3 py-2 text-foreground font-bold">
                             Total Market Trip Sourcing
                           </td>
-                          <td className="px-2 py-2 text-left text-muted-foreground font-medium truncate">
+                          {/* <td className="px-2 py-2 text-left text-muted-foreground font-medium truncate">
                             {[...new Set(tripItems.map((i) => i.supplier).filter(Boolean))].length} suppliers
-                          </td>
+                          </td> */}
                           <td className="px-3 py-2 text-right font-bold text-muted-foreground tabular-nums">
                             {tripTotalDemand.toLocaleString("en-IN")} kg
                           </td>
-                          <td className="px-2 py-2 text-left text-muted-foreground font-medium">
+                          {/* <td className="px-2 py-2 text-left text-muted-foreground font-medium">
                             {tripItems.length} {tripItems.length === 1 ? "item" : "items"}
                           </td>
                           <td className="px-2 py-2 text-right font-bold text-foreground tabular-nums">
@@ -2354,7 +2320,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                           </td>
                           <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">
                             Avg ₹{tripAvgRate}/kg
-                          </td>
+                          </td> */}
                           <td className="px-3 py-2 text-right font-bold text-foreground tabular-nums">
                             ₹{tripTotalAmount.toLocaleString("en-IN")}
                           </td>
@@ -2573,14 +2539,14 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
               </Button>
 
               <div className="flex flex-wrap items-center gap-2">
-                <Button
+                {/* <Button
                   variant="outline"
                   size="sm"
                   onClick={() => handleConfirmCreateTrip(true)}
                   className="h-9 inline-flex items-center gap-1.5 rounded-lg border-emerald-500/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 text-xs font-semibold shadow-xs"
                 >
                   <Share2 className="size-3.5" /> Confirm & Send WhatsApp
-                </Button>
+                </Button> */}
                 <Button
                   size="sm"
                   onClick={() => handleConfirmCreateTrip(false)}
@@ -2780,6 +2746,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 size="sm"
                 onClick={() => {
                   const spec =
+                    catalog?.find((x) => x.name.toLowerCase() === selectedProduct.product.toLowerCase()) ||
                     PRODUCT_CATALOG.find((x) => x.name.toLowerCase() === selectedProduct.product.toLowerCase()) ||
                     { defaultPackSize: "1 kg" };
                   const buyersText = selectedProduct.buyers

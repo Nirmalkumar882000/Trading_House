@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ArrowRight, Check, ChevronDown, Pencil, Plus, Search, Trash2, X, Download, FileText, Scale, QrCode, Eye, MessageCircle, Package, RotateCcw, Clock, Boxes, Sparkles, CheckCircle2 } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, Pencil, Plus, Search, Trash2, X, Download, FileText, Scale, QrCode, Eye, MessageCircle, Package, RotateCcw, Clock, Boxes, Sparkles, CheckCircle2, BookOpen, Building2 } from "lucide-react";
 import { toast } from "sonner";
-import { fmtMoney, type Field, type ModuleDef, type Row, PRODUCT_CATALOG, getPackSpecOptions } from "@/lib/modules";
+import { fmtMoney, type Field, type ModuleDef, type Row, PRODUCT_CATALOG, getPackSpecOptions, totalPacketCount, DEFAULT_WAREHOUSE, WAREHOUSES } from "@/lib/modules";
 import { useStore } from "@/lib/store";
 import { canViewPrice, canEditPrice, maskPriceIfRestricted } from "@/lib/rbac";
 
@@ -21,6 +21,7 @@ import { QrStickerModal } from "./QrStickerModal";
 import { BuyerDemandModal } from "./BuyerDemandModal";
 import { ReturnContainerModal } from "./ReturnContainerModal";
 import { ContainerReturnChallanModal } from "./ContainerReturnChallanModal";
+import { ProductCatalogModal } from "./ProductCatalogModal";
 import { StatusBadge } from "./StatusBadge";
 import { cn } from "@/lib/utils";
 import { outstandingDemand } from "@/lib/sourcing";
@@ -66,7 +67,8 @@ const fmt = (f: Field, v: unknown, role: string) => {
 };
 
 export function ModulePage({ mod }: { mod: ModuleDef }) {
-  const { data, role, upsert, remove, nextId, clearModule } = useStore();
+  const { data, role, upsert, remove, nextId, clearModule, catalog } = useStore();
+  const [catalogOpen, setCatalogOpen] = useState(false);
 
   const rows = useMemo(() => {
     const baseRows = data[mod.slug] ?? [];
@@ -146,7 +148,13 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
   const [returnContainerRow, setReturnContainerRow] = useState<Row | null>(null);
   const [returnChallanRow, setReturnChallanRow] = useState<Row | null>(null);
   const view = rows.find((r) => r.id === viewId) ?? null;
-  const cols = mod.fields.filter((f) => f.list);
+  const cols = useMemo(() => {
+    const base = mod.fields.filter((f) => f.list);
+    if (mod.slug !== "purchase-orders") return base;
+    const itemIdx = base.findIndex((f) => f.key === "item");
+    const packetsCol: Field = { key: "__packets", label: "Packet", type: "number" };
+    return itemIdx === -1 ? [...base, packetsCol] : [...base.slice(0, itemIdx + 1), packetsCol, ...base.slice(itemIdx + 1)];
+  }, [mod]);
 
   const sendWhatsAppDemand = (r: Row) => {
     const ls = parseLines(r["item"]);
@@ -244,6 +252,15 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">{mod.description}</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {mod.slug === "purchase-orders" && (
+            <Button
+              variant="outline"
+              onClick={() => setCatalogOpen(true)}
+              className="inline-flex items-center gap-2 rounded-lg border border-primary/30 bg-card px-3.5 py-2 text-sm font-semibold text-foreground hover:bg-muted shadow-2xs"
+            >
+              <BookOpen className="size-4 text-primary" /> Add Catalog
+            </Button>
+          )}
           <Button variant="outline" onClick={exportCsv} className="inline-flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm font-medium text-foreground hover:bg-muted">
             <Download className="size-4" /> Export
           </Button>
@@ -273,6 +290,48 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
           );
         })}
       </div>
+
+      {/* Buyer Purchase Order Commodity Catalog Banner */}
+      {mod.slug === "purchase-orders" && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/25 bg-gradient-to-r from-primary/10 via-card to-background p-4 shadow-xs">
+          <div className="flex items-center gap-3">
+            <div className="rounded-xl bg-primary/15 p-2.5 text-primary">
+              <BookOpen className="size-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-bold text-foreground">
+                  Buyer Commodity Catalog & Pack Sizes
+                </h3>
+                <span className="rounded-full bg-primary/15 px-2.5 py-0.5 text-[11px] font-bold text-primary">
+                  {catalog.length} Commodities Configured
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Manage produce specifications (kg / piece / range) & categories used across Buyer Purchase Orders.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => setCatalogOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3.5 py-1.5 text-xs font-semibold text-primary-foreground shadow-sm hover:opacity-90"
+            >
+              <Plus className="size-3.5" /> Add to Catalog
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCatalogOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+            >
+              <Eye className="size-3.5" /> View Catalog Details
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Sales Order & Warehouse Inventory Fulfillment Pipeline Banner */}
       {mod.slug === "sales-orders" && (
@@ -388,7 +447,24 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
               {filtered.map((r) => (
                 <tr key={r.id} onClick={() => setViewId(r.id)} className="cursor-pointer border-t transition-colors hover:bg-primary-soft/50">
                   <td className="px-4 py-3 font-mono text-xs font-semibold text-primary">{r.id}</td>
-                  {cols.map((c) => <td key={c.key} className={cn("whitespace-nowrap px-4 py-3", c.type === "number" && "text-right tabular-nums")}>{c.type === "products" ? <ProductChips v={r[c.key]} /> : fmt(c, r[c.key], role)}</td>)}
+                  {cols.map((c) => (
+                  <td key={c.key} className={cn("whitespace-nowrap px-4 py-3", c.type === "number" && "text-right tabular-nums")}>
+                    {c.key === "warehouse" ? (
+                      <span className="inline-flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400 border border-amber-500/20">
+                        <Building2 className="size-3 text-amber-600 dark:text-amber-400" />
+                        {String(r[c.key] || DEFAULT_WAREHOUSE)}
+                      </span>
+                    ) : c.key === "__packets" ? (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                        {totalPacketCount(r).toLocaleString("en-IN")} pkts
+                      </span>
+                    ) : c.type === "products" ? (
+                      <ProductChips v={r[c.key]} />
+                    ) : (
+                      fmt(c, r[c.key], role)
+                    )}
+                  </td>
+                ))}
                   <td className="px-4 py-3">
                     <StatusBadge status={r.status} statuses={mod.statuses} />
                     {mod.slug === "sales-orders" && (
@@ -642,6 +718,12 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
           container={returnChallanRow}
         />
       )}
+      {catalogOpen && (
+        <ProductCatalogModal
+          isOpen={catalogOpen}
+          onClose={() => setCatalogOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -649,7 +731,15 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
 function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row: Row; onClose: () => void; onSave: (r: Row) => void; isNew: boolean }) {
   const { data, role } = useStore();
   const priceEditable = canEditPrice(role as any);
-  const [form, setForm] = useState<Row>(() => (mod.slug === "trips" && !row["buys"] ? { ...row, buys: JSON.stringify(buysFromTrip(row)) } : row));
+  const [form, setForm] = useState<Row>(() => {
+    // A new trip's template carries buys as an empty "[]" string, so check the parsed lines, not the raw value.
+    if (mod.slug !== "trips" || (row["buys"] && parseBuys(row["buys"]).length > 0)) return row;
+    // New trip: pre-fill one line for every demand product, with KG = buyer demand (same figure shown in the chips).
+    const initialBuys = isNew
+      ? outstandingDemand(data).map((d) => ({ s: "", p: d.product, q: d.outstanding, r: 0 }))
+      : buysFromTrip(row);
+    return { ...row, buys: JSON.stringify(initialBuys) };
+  });
   const live = normalize(mod.slug, { ...form, ...(mod.compute?.(form) ?? {}) } as Row);
   const need = useMemo(() => {
     if (mod.slug !== "trips") return {};
@@ -789,29 +879,7 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                   />
                   {mod.slug === "purchase-orders" && (
                     <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 text-xs shadow-2xs">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-medium text-muted-foreground">📦 Products Base:</span>
-                        <span className="font-bold text-foreground tabular-nums">
-                          {parseLines(live[f.key]).reduce((s, l) => s + (Number(l.q) || 0), 0).toLocaleString("en-IN")} kg
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-semibold text-amber-700 dark:text-amber-400">➕ Extra KG (Buffer):</span>
-                        <div className="inline-flex items-center gap-1">
-                          <input
-                            aria-label="Extra buyer demand buffer KG"
-                            type="number"
-                            min="0"
-                            step="any"
-                            placeholder="0"
-                            value={live["extraKg"] !== undefined && live["extraKg"] !== 0 ? live["extraKg"] : (live["extraKg"] === 0 ? "0" : "")}
-                            onChange={(e) => set("extraKg", e.target.value === "" ? 0 : Number(e.target.value))}
-                            className="w-20 rounded-md border border-amber-500/40 bg-background px-2 py-1 text-right text-xs font-bold tabular-nums outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500/20"
-                          />
-                          <span className="text-[11px] font-semibold text-amber-700 dark:text-amber-400">kg</span>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 border-l border-primary/20 pl-3">
+                      <div className="flex items-center gap-2">
                         <span className="font-semibold text-foreground">🎯 Total Buyer Demand:</span>
                         <span className="rounded-lg bg-primary px-2.5 py-1 font-mono text-xs font-bold text-primary-foreground shadow-xs">
                           {Number(live["qty"] || 0).toLocaleString("en-IN")} kg
@@ -830,7 +898,7 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                       if (mod.slug === "returns") return ["Dispatched", "Closed"].includes(r.status);
                       if (mod.slug === "sales-orders" && f.key === "po") return r["buyer"] === form["buyer"] && r.status !== "Rejected";
                       return r.status !== "Rejected" && r.status !== "Inactive";
-                    }).map(r => ({ value: ["buyer", "supplier", "transporter"].includes(f.key) ? String(r["name"]) : r.id, label: `${r.id} · ${r["name"] || r["buyer"] || r["supplier"] || r["lot"] || r.status}` })) : (f.options ?? []).map(o => ({ value:o, label:o }))).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    }).map(r => ({ value: ["buyer", "supplier", "transporter"].includes(f.key) ? String(r["name"]) : r.id, label: `${mod.slug === "receipts" && f.key === "dc" ? (data["transport"] ?? []).find((t) => t["ref"] === r.id)?.id ?? r.id : r.id} · ${r["name"] || r["buyer"] || r["supplier"] || r["lot"] || r.status}` })) : (f.options ?? []).map(o => ({ value:o, label:o }))).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
                   {mod.slug === "sales-orders" && f.key === "po" && live["po"] && (() => {
                     const currentPacked = stock(data).filter(s => s.category === "Packed");
@@ -1122,13 +1190,17 @@ function ProductPicker({
   defaultRate?: number;
   priceEditable?: boolean;
 }) {
+  const { catalog } = useStore();
+  const [catalogPickerOpen, setCatalogPickerOpen] = useState(false);
+  const allOptions = useMemo(() => Array.from(new Set([...options, ...catalog.map((c) => c.name)])), [options, catalog]);
+
   const [filterQuery, setFilterQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
   const [selectedPackSize, setSelectedPackSize] = useState<string>("All");
   const lines = parseLines(value);
   const emit = (ls: Line[]) => onChange(JSON.stringify(ls));
   const toggle = (p: string) => {
-    const spec = PRODUCT_CATALOG.find((item) => item.name === p);
+    const spec = catalog.find((item) => item.name === p) || PRODUCT_CATALOG.find((item) => item.name === p);
     const defaultPackSizeKg = spec?.packSizeKg && spec.packSizeKg > 0 ? spec.packSizeKg : 1.0;
     const defaultPackLabel = spec?.defaultPackSize ?? (defaultPackSizeKg < 1 ? `${Math.round(defaultPackSizeKg * 1000)} g` : `${defaultPackSizeKg} kg`);
     emit(
@@ -1145,7 +1217,7 @@ function ProductPicker({
 
   // Calculate total packets across selected products
   const totalPackets = lines.reduce((sum, l) => {
-    const spec = PRODUCT_CATALOG.find((item) => item.name === l.p);
+    const spec = catalog.find((item) => item.name === l.p) || PRODUCT_CATALOG.find((item) => item.name === l.p);
     const packKg = l.packKg ?? (spec?.packSizeKg && spec.packSizeKg > 0 ? spec.packSizeKg : 1.0);
     return sum + (Number(l.q) || 0) / packKg;
   }, 0);
@@ -1153,19 +1225,19 @@ function ProductPicker({
   // Derive distinct categories from options matching catalog
   const categories = useMemo(() => {
     const cats = new Set<string>();
-    options.forEach((o) => {
-      const spec = PRODUCT_CATALOG.find((item) => item.name === o);
+    allOptions.forEach((o) => {
+      const spec = catalog.find((item) => item.name === o) || PRODUCT_CATALOG.find((item) => item.name === o);
       if (spec?.category) cats.add(spec.category);
     });
     return ["All", ...Array.from(cats)];
-  }, [options]);
+  }, [allOptions, catalog]);
 
   const PACK_SIZES = ["All", "150 g", "250 g", "300 g", "500 g", "750 g", "1 kg", "1 pc"];
 
   const shownOptions = useMemo(() => {
     const q = filterQuery.trim().toLowerCase();
-    return options.filter((o) => {
-      const spec = PRODUCT_CATALOG.find((item) => item.name === o);
+    return allOptions.filter((o) => {
+      const spec = catalog.find((item) => item.name === o) || PRODUCT_CATALOG.find((item) => item.name === o);
       const matchesCategory =
         selectedCategory === "All" || spec?.category === selectedCategory;
       const matchesPackSize =
@@ -1180,7 +1252,7 @@ function ProductPicker({
         (spec?.defaultPackSize && spec.defaultPackSize.toLowerCase().includes(q));
       return matchesCategory && matchesPackSize && matchesQuery;
     });
-  }, [options, selectedCategory, selectedPackSize, filterQuery]);
+  }, [allOptions, catalog, selectedCategory, selectedPackSize, filterQuery]);
 
   return (
     <div className="space-y-3 rounded-2xl border bg-muted/20 p-3.5">
@@ -1200,11 +1272,22 @@ function ProductPicker({
           <div className="flex items-center justify-between pb-2 border-b border-border/50">
             <div>
               <h4 className="text-xs font-bold text-foreground uppercase tracking-wider">Product Catalog</h4>
-              <p className="text-[11px] text-muted-foreground">{options.length} items available</p>
+              <p className="text-[11px] text-muted-foreground">{allOptions.length} items available</p>
             </div>
-            <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-[10px] font-bold text-primary">
-              {lines.length} added
-            </span>
+            <div className="flex items-center gap-1.5">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setCatalogPickerOpen(true)}
+                className="h-6 px-2 text-[10px] font-bold text-primary hover:bg-primary/10 rounded-md inline-flex items-center gap-1 border-primary/30"
+              >
+                <Plus className="size-2.5" /> Add to Catalog
+              </Button>
+              <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-[10px] font-bold text-primary">
+                {lines.length} added
+              </span>
+            </div>
           </div>
 
           {/* Search Box */}
@@ -1643,6 +1726,12 @@ function ProductPicker({
           )}
         </div>
       </div>
+      {catalogPickerOpen && (
+        <ProductCatalogModal
+          isOpen={catalogPickerOpen}
+          onClose={() => setCatalogPickerOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1717,41 +1806,33 @@ function BuysEditor({ products, suppliers, value, onChange, need, priceEditable 
   const left = (p: string, skip = -1) => Math.max(0, Math.round(((need[p]?.buy ?? 0) - planned(p, skip)) * 1000) / 1000);
   const needed = Object.entries(need);
   const kgTotal = buys.reduce((a, b) => a + b.q, 0);
+  const containerTotal = buys.reduce((a, b) => a + (b.cc || 0), 0);
+  const CONTAINER_TYPES = ["Plastic crates", "Wooden boxes", "Gunny bags", "Carton boxes"];
   const amount = buys.reduce((a, b) => a + b.q * b.r, 0);
   return (
     <div className="space-y-3 rounded-xl border bg-muted/30 p-3">
-      {needed.length > 0 && (
-        <div className="space-y-1.5">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Buyer demand · tap to add a line</p>
-          <div className="flex flex-wrap gap-1.5">
-            {needed.map(([p, n]) => (
-              <Button variant="ghost" type="button" key={p} onClick={() => emit([...buys, { s: "", p, q: left(p), r: 0 }])} className="inline-flex h-auto items-center gap-1.5 rounded-lg border bg-card px-2.5 py-1 text-xs hover:border-primary">
-                <Plus className="size-3" /> <strong>{p}</strong> demand {n.demand} kg · to buy {n.buy} kg{planned(p) > 0 && <span className="text-primary"> · left {left(p)}</span>}
-              </Button>
-            ))}
-          </div>
-        </div>
-      )}
       {!suppliers.length && <p className="text-xs text-destructive">Add suppliers in the Suppliers module first.</p>}
       {buys.length > 0 && (
         <div className="overflow-x-auto rounded-lg border bg-card">
           <table className="w-full text-sm">
             <thead className="bg-muted/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-              <tr><th className="px-2 py-2">Supplier</th><th className="px-2 py-2">Product</th><th className="px-2 py-2">KG</th><th className="px-2 py-2">Price / KG</th><th className="px-2 py-2 text-right">Amount</th><th /></tr>
+              <tr><th className="px-2 py-2">Supplier</th><th className="px-2 py-2">Product</th><th className="px-2 py-2">KG</th><th className="px-2 py-2">Price / KG</th><th className="px-2 py-2">Container</th><th className="px-2 py-2">Containers</th><th className="px-2 py-2 text-right">Amount</th><th /></tr>
             </thead>
             <tbody>
               {buys.map((b, i) => (
                 <tr key={i} className="border-t">
                   <td className="p-1.5"><select aria-label="Supplier" className={cell} value={b.s} onChange={(e) => patch(i, { s: e.target.value })}><option value="">Select</option>{suppliers.map((s) => <option key={s}>{s}</option>)}</select></td>
-                  <td className="p-1.5"><select aria-label="Product" className={cell} value={b.p} onChange={(e) => patch(i, { p: e.target.value, ...(b.q ? {} : { q: left(e.target.value, i) }) })}><option value="">Select</option>{products.map((p) => <option key={p} value={p}>{need[p] ? `${p} · need ${need[p].buy} kg` : p}</option>)}</select>{b.p && need[b.p] && <p className="mt-0.5 text-[10px] text-muted-foreground">Demand {need[b.p]!.demand} · to buy {need[b.p]!.buy} · left {left(b.p)} kg</p>}</td>
-                  <td className="p-1.5"><input aria-label="KG" type="number" min="0" step="any" className={cn(cell, "w-20")} value={b.q || ""} onChange={(e) => patch(i, { q: Number(e.target.value) })} /></td>
+                  <td className="p-1.5"><select aria-label="Product" className={cell} value={b.p} onChange={(e) => patch(i, { p: e.target.value, ...(b.q ? {} : { q: left(e.target.value, i) }) })}><option value="">Select</option>{products.map((p) => <option key={p} value={p}>{p}</option>)}</select>{b.p && need[b.p] && <p className="mt-0.5 text-[10px] text-muted-foreground">Demand {need[b.p]!.demand} kg</p>}</td>
+                  <td className="p-1.5"><input aria-label="KG" type="number" min="0" step="any" className={cn(cell, "w-20")} value={b.q} onChange={(e) => patch(i, { q: Number(e.target.value) })} /></td>
                   <td className="p-1.5"><input aria-label="Price per KG" type="number" min="0" step="any" disabled={!priceEditable} title={!priceEditable ? "Purchase price entered by back office only" : undefined} className={cn(cell, "w-20 disabled:bg-muted disabled:text-muted-foreground")} value={b.r || ""} onChange={(e) => patch(i, { r: Number(e.target.value) })} /></td>
+                  <td className="p-1.5"><select aria-label="Container type" className={cell} value={b.ct || ""} onChange={(e) => patch(i, { ct: e.target.value })}><option value="">Select</option>{CONTAINER_TYPES.map((c) => <option key={c} value={c}>{c}</option>)}</select></td>
+                  <td className="p-1.5"><input aria-label="Containers" type="number" min="0" step="1" className={cn(cell, "w-20")} value={b.cc || ""} onChange={(e) => patch(i, { cc: Number(e.target.value) })} /></td>
                   <td className="p-1.5 text-right tabular-nums">{fmtMoney(b.q * b.r)}</td>
                   <td className="p-1.5 text-right"><Button variant="ghost" type="button" aria-label="Remove line" onClick={() => emit(buys.filter((_, j) => j !== i))} className="rounded p-1 text-destructive hover:bg-danger-soft"><X className="size-3.5" /></Button></td>
                 </tr>
               ))}
             </tbody>
-            <tfoot><tr className="border-t bg-muted/40 text-xs font-semibold"><td className="px-2 py-2" colSpan={2}>{buys.length} lines</td><td className="px-2 py-2 tabular-nums">{kgTotal.toLocaleString("en-IN")}</td><td /><td className="px-2 py-2 text-right tabular-nums">{fmtMoney(amount)}</td><td /></tr></tfoot>
+            <tfoot><tr className="border-t bg-muted/40 text-xs font-semibold"><td className="px-2 py-2" colSpan={2}>{buys.length} lines</td><td className="px-2 py-2 tabular-nums">{kgTotal.toLocaleString("en-IN")}</td><td /><td /><td className="px-2 py-2 tabular-nums">{containerTotal.toLocaleString("en-IN")}</td><td className="px-2 py-2 text-right tabular-nums">{fmtMoney(amount)}</td><td /></tr></tfoot>
           </table>
         </div>
       )}
