@@ -30,6 +30,7 @@ import { QrStickerModal } from "./QrStickerModal";
 import { EmployeeSelect } from "./EmployeeSelect";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
+import { filterBuyerAllocations, type BuyerAllocationStatus } from "@/lib/packing";
 import {
   lines,
   normalize,
@@ -200,7 +201,8 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
 
   // Filters for Buyer Demands and Packed Batches
   const [buyerSearch, setBuyerSearch] = useState("");
-  const [buyerFilterStatus, setBuyerFilterStatus] = useState<"all" | "pending" | "fulfilled">("all");
+  const [buyerFilterStatus, setBuyerFilterStatus] = useState<BuyerAllocationStatus>("all");
+  const [selectedBuyer, setSelectedBuyer] = useState("all");
   const [packedSearch, setPackedSearch] = useState("");
 
   // Split Modal State
@@ -741,19 +743,20 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
   };
 
   // Filtered Buyer Allocations
-  const filteredBuyerAllocations = useMemo(() => {
-    return buyerAllocations.filter((item) => {
-      const matchSearch =
-        !buyerSearch.trim() ||
-        item.buyer.toLowerCase().includes(buyerSearch.toLowerCase()) ||
-        item.poId.toLowerCase().includes(buyerSearch.toLowerCase()) ||
-        item.product.toLowerCase().includes(buyerSearch.toLowerCase());
-      if (!matchSearch) return false;
-      if (buyerFilterStatus === "pending") return item.balanceKg > 0.001;
-      if (buyerFilterStatus === "fulfilled") return item.balanceKg <= 0.001;
-      return true;
-    });
-  }, [buyerAllocations, buyerSearch, buyerFilterStatus]);
+  const buyerNames = useMemo(
+    () => [...new Set(buyerAllocations.map((item) => item.buyer))].sort((a, b) => a.localeCompare(b)),
+    [buyerAllocations],
+  );
+  const buyerScopedAllocations = useMemo(
+    () => selectedBuyer === "all"
+      ? buyerAllocations
+      : buyerAllocations.filter((item) => item.buyer === selectedBuyer),
+    [buyerAllocations, selectedBuyer],
+  );
+  const filteredBuyerAllocations = useMemo(
+    () => filterBuyerAllocations(buyerAllocations, selectedBuyer, buyerFilterStatus, buyerSearch),
+    [buyerAllocations, selectedBuyer, buyerFilterStatus, buyerSearch],
+  );
 
   // Filtered Packed Batches
   const filteredPackRows = useMemo(() => {
@@ -772,8 +775,8 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
   }, [packRows, packedSearch]);
 
   const pendingBuyerDemandsCount = useMemo(
-    () => buyerAllocations.filter((b) => b.balanceKg > 0.001).length,
-    [buyerAllocations]
+    () => buyerScopedAllocations.filter((b) => b.balanceKg > 0.001).length,
+    [buyerScopedAllocations]
   );
 
   return (
@@ -1431,6 +1434,22 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
 
             {/* Search & Filter Controls */}
             <div className="flex flex-wrap items-center gap-2">
+              <label className="sr-only" htmlFor="buyer-po-filter">Filter by buyer</label>
+              <select
+                id="buyer-po-filter"
+                aria-label="Filter by buyer"
+                value={selectedBuyer}
+                onChange={(e) => setSelectedBuyer(e.target.value)}
+                className="h-8 min-w-40 rounded-lg border bg-background px-2.5 text-xs outline-none focus:ring-1 focus:ring-primary"
+              >
+                <option value="all">All buyers ({buyerAllocations.length})</option>
+                {buyerNames.map((buyer) => (
+                  <option key={buyer} value={buyer}>
+                    {buyer} ({buyerAllocations.filter((item) => item.buyer === buyer).length})
+                  </option>
+                ))}
+              </select>
+
               <div className="relative">
                 <Search className="size-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
                 <input
@@ -1453,7 +1472,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                       : "text-muted-foreground hover:text-foreground"
                   )}
                 >
-                  All ({buyerAllocations.length})
+                  All ({buyerScopedAllocations.length})
                 </button>
                 <button
                   type="button"
@@ -1477,7 +1496,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                       : "text-muted-foreground hover:text-foreground"
                   )}
                 >
-                  Fulfilled ({buyerAllocations.length - pendingBuyerDemandsCount})
+                  Fulfilled ({buyerScopedAllocations.length - pendingBuyerDemandsCount})
                 </button>
               </div>
             </div>
