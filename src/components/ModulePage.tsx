@@ -1243,6 +1243,13 @@ function ProductPicker({
     return sum + (Number(l.q) || 0) / packKg;
   }, 0);
 
+  const isAllPiece = lines.length > 0 && lines.every((l) => {
+    const spec = catalog.find((item) => item.name === l.p) || PRODUCT_CATALOG.find((item) => item.name === l.p);
+    const lbl = l.packLabel || spec?.defaultPackSize || "";
+    return lbl.toLowerCase().includes("pc");
+  });
+  const countUnit = isAllPiece ? "pcs" : "pkts";
+
   // Derive distinct categories from options matching catalog
   const categories = useMemo(() => {
     const cats = new Set<string>();
@@ -1402,7 +1409,7 @@ function ProductPicker({
                         <span className="rounded bg-muted px-1.5 py-0.2 font-medium text-muted-foreground">{spec.category}</span>
                       )}
                       <span className="rounded bg-primary/10 px-1.5 py-0.2 font-semibold text-primary">
-                        · {packSizeLabel} ({packSizeKg} kg)
+                        · {packSizeLabel.toLowerCase().includes("pc") ? packSizeLabel : `${packSizeLabel} (${packSizeKg} kg)`}
                       </span>
                     </div>
                   </div>
@@ -1441,7 +1448,7 @@ function ProductPicker({
             {lines.length > 0 && (
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold text-foreground tabular-nums">
-                  {Math.round(totalPackets * 10) / 10} pkts · {totalQty.toLocaleString("en-IN")} kg
+                  {Math.round(totalPackets * 10) / 10} {countUnit} · {totalQty.toLocaleString("en-IN")} kg
                 </span>
                 <button
                   type="button"
@@ -1538,7 +1545,7 @@ function ProductPicker({
                                     value={opt.kg}
                                     className="bg-card text-foreground font-medium text-xs py-1"
                                   >
-                                    {opt.label} ({formatKgSpec(opt.kg)})
+                                    {opt.label.toLowerCase().includes("pc") ? opt.label : `${opt.label} (${formatKgSpec(opt.kg)})`}
                                   </option>
                                 ))}
                               </select>
@@ -1690,7 +1697,7 @@ function ProductPicker({
                       {lines.length} {lines.length === 1 ? "product" : "products"}
                     </td>
                     <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground font-medium">
-                      {Math.round(totalPackets * 10) / 10} pkts
+                      {Math.round(totalPackets * 10) / 10} {countUnit}
                     </td>
                     <td className="px-2.5 py-2 text-right tabular-nums font-bold text-foreground">
                       {totalQty.toLocaleString("en-IN")} kg

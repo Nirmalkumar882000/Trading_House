@@ -268,7 +268,7 @@ const BASE_MODULES: ModuleDef[] = [
       { key: "deliveryDate", label: "Delivery date", type: "date" },
     ],
     seed: [
-      { date: d(21), buyer: BUYERS[0], source: "Buyer Portal", item: '[{"p":"Tomato","q":150},{"p":"Onion","q":80},{"p":"Coriander","q":20}]', qty: 250, deliveryDate: d(22), status: "Converted" },
+      { date: d(21), buyer: BUYERS[0], source: "Buyer Portal", item: '[{"p":"Cabbage","q":150},{"p":"Tomato","q":150},{"p":"Onion","q":80},{"p":"Coriander","q":20}]', qty: 400, deliveryDate: d(22), status: "Accepted" },
       { date: d(21), buyer: BUYERS[2], source: "Manual", item: '[{"p":"Onion","q":300},{"p":"Potato","q":120}]', qty: 420, deliveryDate: d(22), status: "Accepted" },
       { date: d(21), buyer: BUYERS[1], source: "Buyer Portal", item: '[{"p":"Coriander","q":80}]', qty: 80, deliveryDate: d(23), status: "Received" },
       { date: d(20), buyer: BUYERS[4], source: "Buyer Portal", item: '[{"p":"Potato","q":500}]', qty: 500, deliveryDate: d(21), status: "Converted" },
@@ -305,7 +305,7 @@ const BASE_MODULES: ModuleDef[] = [
     compute: (r) => ({ net: +(n(r.gross) - n(r.tare)).toFixed(2) }),
     validate: (r) => (r.status === "Submitted" && n(r.signatures) < 3 ? "All 3 signatures (supplier, driver, loader) are required before submission." : null),
     seed: [
-      { date: d(21), po: "PO-1001", supplier: SUPPLIERS[0], vehicle: VEHICLES[0], driver: "Raja", item: '[{"p":"Tomato","q":592},{"p":"Coriander","q":40}]', units: 40, gross: 640, tare: 48, net: 592, signatures: "3", status: "Submitted" },
+      { date: d(21), po: "PO-1001", supplier: SUPPLIERS[0], vehicle: VEHICLES[0], driver: "Raja", item: '[{"p":"Cabbage","q":175},{"p":"Tomato","q":592},{"p":"Coriander","q":40}]', units: 48, gross: 830, tare: 53, net: 777, signatures: "3", status: "Submitted" },
       { date: d(21), po: "PO-1002", supplier: SUPPLIERS[1], vehicle: VEHICLES[1], driver: "Ganesh", item: '[{"p":"Onion","q":1235}]', units: 25, gross: 1260, tare: 25, net: 1235, signatures: "2", status: "Signed" },
       { date: d(21), po: "PO-1003", supplier: SUPPLIERS[3], vehicle: VEHICLES[2], driver: "Suresh", item: '[{"p":"Carrot","q":444}]', units: 30, gross: 480, tare: 36, net: 444, signatures: "0", status: "Loading" },
       { date: d(20), po: "PO-1004", supplier: SUPPLIERS[2], vehicle: VEHICLES[0], driver: "Raja", item: '[{"p":"Coriander","q":198}]', units: 200, gross: 210, tare: 12, net: 198, signatures: "3", status: "Submitted" },
@@ -365,6 +365,7 @@ const BASE_MODULES: ModuleDef[] = [
     compute: (r) => ({ diff: +(n(r.received) - n(r.sent)).toFixed(2) }),
     validate: (r) => (n(r.diff) !== 0 && (!r.reason || r.reason === "—") && ["Validated", "Posted"].includes(String(r.status)) ? "A reason is required when received weight differs from sent." : null),
     seed: [
+      { date: d(21), route: "Market trip", dc: "TRP-1001", item: "Cabbage", sent: 175, received: 175, diff: 0, reason: "—", status: "Posted" },
       { date: d(21), route: "Market trip", dc: "TRP-1001", item: "Tomato", sent: 592, received: 585, diff: -7, reason: "Moisture loss", status: "Posted" },
       { date: d(20), route: "Market trip", dc: "TRP-1004", item: "Coriander", sent: 198, received: 198, diff: 0, reason: "—", status: "Posted" },
       { date: d(21), route: "Direct supplier", dc: "DS-2207", item: "Potato", sent: 800, received: 792, diff: -8, reason: "Scale variance", status: "Validated" },
@@ -412,6 +413,7 @@ const BASE_MODULES: ModuleDef[] = [
     },
     validate: (r) => (n(r.gradeA) > n(r.input) ? "Grade A cannot exceed input quantity." : n(r.gradeB) > n(r.reject) ? "Grade B cannot exceed rejected quantity." : null),
     seed: [
+      { lot: "GRN-1001", item: "Cabbage", grader: EMPLOYEES[3], input: 175, gradeA: 175, reject: 0, gradeB: 0, trash: 0, status: "Stage 1 done" },
       { lot: "GRN-1001", item: "Tomato", grader: EMPLOYEES[2], input: 100, gradeA: 70, reject: 30, gradeB: 22, trash: 8, status: "Stage 2 done" },
       { lot: "GRN-1001", item: "Tomato", grader: EMPLOYEES[3], input: 485, gradeA: 410, reject: 75, gradeB: 0, trash: 75, status: "Stage 1 done" },
       { lot: "GRN-1002", item: "Coriander", grader: EMPLOYEES[2], input: 198, gradeA: 0, reject: 198, gradeB: 0, trash: 198, status: "Assigned" },
