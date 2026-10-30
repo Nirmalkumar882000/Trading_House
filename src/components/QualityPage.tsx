@@ -463,6 +463,7 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
   const [tab, setTab] = useState<Tab>("assign");
   const rows = data["quality-check"] ?? [];
   const receipts = data["receipts"] ?? [];
+  const returns = data["returns"] ?? [];
   const trips = data["trips"] ?? [];
   const purchaseOrders = data["purchase-orders"] ?? [];
   const currentBuyer = role === "Buyer" ? ROLES.Buyer.buyerName : undefined;
@@ -497,7 +498,10 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
         const matchGrader = String(r["grader"] || "").toLowerCase().includes(q);
         const matchSupervisor = String(r["supervisor"] || "").toLowerCase().includes(q);
         const matchProducts = lines(r, "input").some((l) => l.p.toLowerCase().includes(q));
-        return matchRef || matchLot || matchGrader || matchSupervisor || matchProducts;
+        const returnRecord = returnRows.find((record) => record.id === r["lot"]);
+        const matchReturnDetails = [returnRecord?.["buyer"], returnRecord?.["salesDc"], returnRecord?.["reason"]]
+          .some((value) => String(value || "").toLowerCase().includes(q));
+        return matchRef || matchLot || matchGrader || matchSupervisor || matchProducts || matchReturnDetails;
       });
   }, [data, currentBuyer, statusFilter, searchQuery]);
 
@@ -516,6 +520,7 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
 
   // ---- Stage 1 State & Assignment State ----
   const [lot, setLot] = useState("");
+  const [sourceType, setSourceType] = useState<"Purchase" | "Return">("Purchase");
   const [grader, setGrader] = useState("Karthik M, Divya R");
   const [supervisor, setSupervisor] = useState("Ravi Kumar");
   const [defaultStartTime, setDefaultStartTime] = useState("10:00 AM");
@@ -560,17 +565,29 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
     );
   };
 
-  const pendingFor = (id: string) => parseLines(populate("quality-check", "lot", id, { id: "", status: "" } as Row, data)["item"]);
-  const stage1Receipts = receipts.filter((r) => r.status === "Posted" && pendingFor(r.id).length > 0);
+  const pendingFor = (type: "Purchase" | "Return", id: string) =>
+    parseLines(populate("quality-check", "lot", id, { id: "", status: "", sourceType: type } as Row, data)["item"]);
+  const stage1Sources = [
+    ...receipts
+      .filter((record) => record.status === "Posted" && pendingFor("Purchase", record.id).length > 0)
+      .map((record) => ({ record, sourceType: "Purchase" as const })),
+    ...returns
+      .filter((record) =>
+        ["Received", "Sent to QC"].includes(record.status) &&
+        pendingFor("Return", record.id).length > 0
+      )
+      .map((record) => ({ record, sourceType: "Return" as const })),
+  ];
 
-  const pickLot = (id: string) => {
+  const pickLot = (id: string, type: "Purchase" | "Return" = sourceType) => {
     setLot(id);
+    setSourceType(type);
     if (!id) {
       setS1([]);
       return;
     }
     const firstGrader = assignedGradersList[0] || "Karthik M";
-    const initialLines = pendingFor(id).map((l, idx) => ({
+    const initialLines = pendingFor(type, id).map((l, idx) => ({
       p: l.p,
       q: l.q,
       a: 0,
@@ -725,14 +742,14 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
     const totalGradeA = ls.reduce((sum, l) => sum + num(l.a), 0);
     const totalRemaining = ls.reduce((sum, l) => sum + Math.max(0, l.q - num(l.a)), 0);
 
-    const srcReceipt = receipts.find((r) => r.id === lot);
+    const sourceRecord = (sourceType === "Return" ? returns : receipts).find((record) => record.id === lot);
     const row = normalize("quality-check", {
       id: nextId("quality-check"),
       status: "Stage 1 done",
       date: new Date().toISOString().slice(0, 10),
-      sourceType: "Purchase",
+      sourceType,
       lot,
-      warehouse: String(srcReceipt?.["warehouse"] || DEFAULT_WAREHOUSE),
+      warehouse: String(sourceRecord?.["warehouse"] || DEFAULT_WAREHOUSE),
       grader: allGraders,
       supervisor: supervisor.trim(),
       startTime: defaultStartTime,
@@ -753,14 +770,25 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
       ),
     } as Row);
 
-    const err = validateData({ ...data, "quality-check": [...rows, row] });
+    const updatedReturn = sourceType === "Return" && sourceRecord
+      ? { ...sourceRecord, status: "Sent to QC" }
+      : undefined;
+    const nextData = {
+      ...data,
+      "quality-check": [...rows, row],
+      ...(updatedReturn ? {
+        returns: returns.map((record) => record.id === updatedReturn.id ? updatedReturn : record),
+      } : {}),
+    };
+    const err = validateData(nextData);
     if (err) return void toast.error(err);
 
     upsert("quality-check", row);
+    if (updatedReturn) upsert("returns", updatedReturn);
     toast.success(
       `${row.id}: Stage 1 completed. ${totalGradeA} kg Grade A ready for packing. ${totalRemaining} kg routed to Stage 2.`
     );
-    pickLot("");
+    pickLot("", sourceType);
   };
 
   // ---- Stage 2 State ----
@@ -768,11 +796,17 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
   const [s2Graders, setS2Graders] = useState<Record<string, string>>({});
   const [edit, setEdit] = useState<S2Edit>({});
   const pending = rows.filter((r) => r.status === "Stage 1 done");
-  const pendingLots = [...new Set(pending.map((r) => String(r["lot"])))];
-  const records = pending.filter((r) => r["lot"] === lot2);
+  const sourceKey = (record: Row) =>
+    `${record["sourceType"] === "Return" ? "Return" : "Purchase"}:${String(record["lot"] || "")}`;
+  const pendingSources = [...new Map(pending.map((record) => [sourceKey(record), record])).entries()];
+  const records = pending.filter((record) => sourceKey(record) === lot2);
   
   const field = (rec: Row, l: ProductLine, idx: number = 0) =>
-    edit[`${rec.id}|${l.p}|${idx}`] ?? edit[`${rec.id}|${l.p}`] ?? { a2: "", b: "", ret: String(returnsAvailable(data, l.p, rec.id)) };
+    edit[`${rec.id}|${l.p}|${idx}`] ?? edit[`${rec.id}|${l.p}`] ?? {
+      a2: "",
+      b: "",
+      ret: rec["sourceType"] === "Return" ? "0" : String(returnsAvailable(data, l.p, rec.id)),
+    };
   const setField = (rec: Row, l: ProductLine, patch: Partial<S2Edit[string]>, idx: number = 0) =>
     setEdit((e) => ({ ...e, [`${rec.id}|${l.p}|${idx}`]: { ...field(rec, l, idx), ...patch } }));
 
@@ -800,8 +834,8 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
   };
 
   const tabs: { key: Tab; label: string; count: number; icon: LucideIcon }[] = [
-    { key: "assign", label: "1. Assign Employees & Split Lines", count: stage1Receipts.length, icon: Users },
-    { key: "s1", label: "2. First QC Check (Grade A Entry)", count: s1.length > 0 ? s1.length : stage1Receipts.length, icon: Sparkles },
+    { key: "assign", label: "1. Assign Employees & Split Lines", count: stage1Sources.length, icon: Users },
+    { key: "s1", label: "2. First QC Check (Grade A Entry)", count: s1.length > 0 ? s1.length : stage1Sources.length, icon: Sparkles },
     { key: "s2", label: "3. Stage 2 (Secondary & Returns)", count: pending.length, icon: Layers },
   ];
 
@@ -870,7 +904,7 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-foreground lg:text-3xl">{mod.title}</h1>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Assign single or multiple employees to produce lines, auto-split bulk lots, and capture Grade A yield.
+            Assign QC employees to purchase receipts or quarantined buyer returns, capture both grading stages, and route saleable stock to packing.
           </p>
         </div>
         <Button asChild variant="outline" size="sm" className="border-emerald-500/30 text-emerald-700 dark:text-emerald-400 bg-emerald-500/5 hover:bg-emerald-500/10 h-9">
@@ -913,16 +947,26 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
           <div className="flex flex-wrap items-end justify-between gap-3 border-b pb-4">
             <div className="grid gap-3 sm:grid-cols-3 flex-1 min-w-[300px]">
               <label className="space-y-1 text-xs font-semibold text-muted-foreground">
-                <span>Source Receipt (GRN)</span>
+                <span>Source Receipt / Buyer Return DC</span>
                 <select
                   className="w-full h-9 rounded-md border bg-background px-3 text-xs font-medium focus:ring-1 focus:ring-primary outline-none"
-                  value={lot}
-                  onChange={(e) => pickLot(e.target.value)}
+                  value={lot ? `${sourceType}:${lot}` : ""}
+                  onChange={(e) => {
+                    if (!e.target.value) {
+                      pickLot("");
+                      return;
+                    }
+                    const [type, id] = e.target.value.split(":");
+                    if (id && (type === "Purchase" || type === "Return")) pickLot(id, type);
+                  }}
                 >
-                  <option value="">Select warehouse receipt</option>
-                  {stage1Receipts.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.id} · {r["warehouse"] ? `[${r["warehouse"]}] · ` : ""}{lines(r, "received").map((l) => `${l.p} ${l.q} kg`).join(", ")}
+                  <option value="">Select warehouse receipt or received return</option>
+                  {stage1Sources.map(({ record, sourceType: type }) => (
+                    <option key={`${type}:${record.id}`} value={`${type}:${record.id}`}>
+                      {type === "Return" ? "Return DC" : "GRN"} {record.id} · {record["warehouse"] ? `[${record["warehouse"]}] · ` : ""}
+                      {type === "Return"
+                        ? `${record["buyer"] || "Buyer"} · ${record["salesDc"] || "Sales DC"} · ${lines(record).map((line) => `${line.p} ${line.q} kg`).join(", ")}`
+                        : lines(record, "received").map((line) => `${line.p} ${line.q} kg`).join(", ")}
                     </option>
                   ))}
                 </select>
@@ -1316,24 +1360,46 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
       {tab === "s2" && (
         <div className="rounded-xl border bg-card p-5 space-y-4 shadow-xs">
           <label className="block max-w-md space-y-1.5 text-xs font-semibold text-muted-foreground">
-            <span>Source Receipt / Lot</span>
+            <span>Source Receipt / Return DC</span>
             <select className="w-full h-9 rounded-md border bg-background px-3 text-xs outline-none focus:ring-1 focus:ring-primary" value={lot2} onChange={(e) => setLot2(e.target.value)}>
-              <option value="">Select receipt</option>
-              {pendingLots.map((l) => (
-                <option key={l} value={l}>
-                  {l}
+              <option value="">Select a Stage 2 source</option>
+              {pendingSources.map(([key, record]) => {
+                const isReturn = record["sourceType"] === "Return";
+                const returnRecord = isReturn ? returns.find((item) => item.id === record["lot"]) : undefined;
+                const receipt = !isReturn ? receipts.find((item) => item.id === record["lot"]) : undefined;
+                return (
+                <option key={key} value={key}>
+                  {isReturn ? "Return DC" : "GRN"} {record["lot"]} · {isReturn
+                    ? `${returnRecord?.["buyer"] || "Buyer"} · ${returnRecord?.["salesDc"] || "Sales DC"}`
+                    : String(receipt?.["warehouse"] || "Purchase receipt")}
                 </option>
-              ))}
+                );
+              })}
             </select>
           </label>
-          {!pendingLots.length && <p className="text-xs text-muted-foreground">Nothing is waiting for Stage 2. Finish Stage 1 first.</p>}
+          {!pendingSources.length && <p className="text-xs text-muted-foreground">Nothing is waiting for Stage 2. Finish Stage 1 first.</p>}
           {records.map((rec) => (
             <div key={rec.id} className="space-y-3 rounded-lg border bg-background p-4 shadow-2xs">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
-                <p className="text-xs font-medium">
-                  <span className="font-mono font-bold text-primary">{rec.id}</span> · Receipt {rec["lot"]} · Stage 1 Grader:{" "}
-                  <span className="font-semibold text-foreground">{rec["grader"]}</span>
-                </p>
+                {(() => {
+                  const isReturn = rec["sourceType"] === "Return";
+                  const source = isReturn
+                    ? returns.find((item) => item.id === rec["lot"])
+                    : receipts.find((item) => item.id === rec["lot"]);
+                  return (
+                    <div className="min-w-[220px] space-y-1 text-xs">
+                      <p className="font-medium">
+                        <span className="font-mono font-bold text-primary">{rec.id}</span> · {isReturn ? "Return DC" : "GRN"} {rec["lot"]}
+                      </p>
+                      <p className="text-muted-foreground">
+                        {isReturn
+                          ? `${source?.["buyer"] || "Buyer"} · Sales DC ${source?.["salesDc"] || "—"} · ${source?.["reason"] || "Return"} · ${source?.["warehouse"] || rec["warehouse"] || DEFAULT_WAREHOUSE}`
+                          : `Warehouse ${source?.["warehouse"] || rec["warehouse"] || DEFAULT_WAREHOUSE}`}
+                        {" · "}Stage 1: <span className="font-semibold text-foreground">{rec["grader"]}</span>
+                      </p>
+                    </div>
+                  );
+                })()}
                 <div className="w-64">
                   <EmployeeSelect
                     multiple
@@ -1353,7 +1419,7 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
                       <th className={th}>Stage 1 Input</th>
                       <th className={th}>Grade A (Stage 1)</th>
                       <th className={th}>Remaining (Rejects)</th>
-                      <th className={th}>+ Buyer Returns</th>
+                      <th className={th}>{rec["sourceType"] === "Return" ? "Return DC input" : "+ Buyer Returns"}</th>
                       <th className={th}>Pool</th>
                       <th className={th}>Grade A (Stage 2)</th>
                       <th className={th}>Grade B</th>
@@ -1376,13 +1442,17 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
                           <td className="px-3 py-2 font-medium text-emerald-600 font-mono">{kg(num(l.a))}</td>
                           <td className="px-3 py-2 font-medium text-amber-600 font-mono">{kg(rem)}</td>
                           <td className="px-3 py-2">
-                            <input
-                              type="number"
-                              min={0}
-                              className="w-20 h-7 rounded border bg-background px-2 text-xs font-mono"
-                              value={f.ret}
-                              onChange={(e) => setField(rec, l, { ret: e.target.value }, lIdx)}
-                            />
+                            {rec["sourceType"] === "Return" ? (
+                              <span className="text-muted-foreground">Included in input</span>
+                            ) : (
+                              <input
+                                type="number"
+                                min={0}
+                                className="w-20 h-7 rounded border bg-background px-2 text-xs font-mono"
+                                value={f.ret}
+                                onChange={(e) => setField(rec, l, { ret: e.target.value }, lIdx)}
+                              />
+                            )}
                           </td>
                           <td className="px-3 py-2 font-medium text-primary font-mono">{kg(pool)}</td>
                           <td className="px-3 py-2">
@@ -1504,7 +1574,7 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
               <thead className="bg-muted/60 text-[10px] uppercase tracking-wider text-muted-foreground border-b select-none">
                 <tr>
                   <th className="py-2.5 px-3 font-semibold">QC Batch / Time</th>
-                  <th className="py-2.5 px-3 font-semibold">Source Receipt</th>
+                  <th className="py-2.5 px-3 font-semibold">Source GRN / Return DC</th>
                   <th className="py-2.5 px-3 font-semibold min-w-[240px]">Products & Input KG</th>
                   <th className="py-2.5 px-3 font-semibold min-w-[180px]">Quality Output & Yield</th>
                   <th className="py-2.5 px-3 font-semibold">QC Graders</th>
@@ -1542,8 +1612,17 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
                         <td className="py-2.5 px-3 align-top">
                           <span className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 font-mono text-[11px] font-semibold text-foreground border">
                             <Package className="size-2.5 text-primary" />
-                            {r["lot"]}
+                            {r["sourceType"] === "Return" ? "Return DC" : "GRN"} {r["lot"]}
                           </span>
+                          {r["sourceType"] === "Return" && (() => {
+                            const source = returns.find((item) => item.id === r["lot"]);
+                            return (
+                              <div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground">
+                                <div>{source?.["buyer"] || "Buyer"} · Sales DC {source?.["salesDc"] || "—"}</div>
+                                <div>{source?.["reason"] || "Return reason not recorded"}</div>
+                              </div>
+                            );
+                          })()}
                           {r["warehouse"] && (
                             <div className="mt-1">
                               <span className="inline-flex items-center gap-1 rounded bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">

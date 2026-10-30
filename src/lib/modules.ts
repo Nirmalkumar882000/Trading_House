@@ -317,9 +317,10 @@ const BASE_MODULES: ModuleDef[] = [
     description: "Supplier enters purchase price against the trip DC in the Market Trader portal.",
     statuses: ["Awaiting price", "Priced", "Confirmed"],
     fields: [
-      { key: "dc", label: "Trip DC", list: true },
-      { key: "supplier", label: "Supplier", type: "select", options: SUPPLIERS, list: true },
-      { key: "item", label: "Products", type: "products", options: ITEMS, list: true },
+      { key: "date", label: "Trip date", type: "date", list: true },
+      { key: "dc", label: "Trip DC", type: "select", required: true, list: true },
+      { key: "supplier", label: "Supplier", type: "select", options: SUPPLIERS, required: true, list: true },
+      { key: "item", label: "Products", type: "products", options: ITEMS, required: true, list: true },
       { key: "qty", label: "Quantity sent", type: "number", suffix: "kg", list: true },
       { key: "rate", label: "Rate / kg", type: "number", money: true, list: true },
       { key: "amount", label: "Amount", type: "number", money: true, readOnly: true, list: true },
@@ -661,6 +662,16 @@ export const getModule = (slug: string) => {
 
 export function seedRows(m: ModuleDef): Row[] {
   return m.seed.map((r, i) => ({ ...r, id: (r.id as string) || `${m.prefix}-${1001 + i}` }) as unknown as Row);
+}
+
+export function ensureDirectoryDemoData(data: Record<string, Row[]>): Record<string, Row[]> {
+  const next = { ...data };
+  for (const slug of ["suppliers", "buyers", "transporters"]) {
+    if (next[slug]?.length) continue;
+    const module = MODULES.find((candidate) => candidate.slug === slug);
+    if (module) next[slug] = seedRows(module);
+  }
+  return next;
 }
 
 export const fmtMoney = (v: unknown) => "₹" + (Number(v) || 0).toLocaleString("en-IN");

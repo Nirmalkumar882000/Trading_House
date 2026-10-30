@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { MODULES, seedRows, type Row, INITIAL_PRODUCT_CATALOG, syncProductCatalog, type ProductItem } from "./modules";
+import { MODULES, seedRows, ensureDirectoryDemoData, type Row, INITIAL_PRODUCT_CATALOG, syncProductCatalog, type ProductItem } from "./modules";
 import { normalize, syncReceiptContainers, syncReceiptDownstream } from "./workflow";
 import type { UserRole } from "./rbac";
 
@@ -60,7 +60,7 @@ const load = (): Data => {
       return demo;
     }
     const parsed = JSON.parse(raw) as Data;
-    let merged = { ...demoInitial(), ...parsed };
+    let merged = ensureDirectoryDemoData({ ...demoInitial(), ...parsed });
     if (merged["receipts"]) {
       for (const r of merged["receipts"]) {
         if (Number(r["containerCount"]) > 0) {

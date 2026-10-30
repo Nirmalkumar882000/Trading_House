@@ -1,6 +1,6 @@
 import type { Field, ModuleDef } from './modules';
 import { WAREHOUSES, DEFAULT_WAREHOUSE } from './modules';
-import { normalize } from './workflow';
+import { normalize, parseLines } from './workflow';
 const products: Field = {key:'item',label:'Products · KG',type:'products',list:true,required:true};
 const number = (key:string,label:string,readOnly=false): Field => ({key,label,type:'number',list:true,readOnly,suffix:'kg'});
 const ref = (key:string,label:string): Field => ({key,label,type:'select',required:true,list:true});
@@ -80,8 +80,8 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
     ]
   },
   'quality-check':{
-    description:'Stage 1 separates Grade A. Only the remainder goes to Stage 2, together with any buyer-returned stock of the same product; Stage 2 grades it into Grade A, Grade B and rejected.',
-    fields:[date,ref('lot','Source receipt'),products,{key:'grader',label:'Grader',required:true,list:true},number('input','Input KG',true),number('gradeA','Total Grade A',true),number('reject','After first check',true),number('gradeB','Grade B',true),number('trash','Rejected',true)],
+    description:'Choose a posted purchase or a received buyer return. Purchase Stage 2 can include unassigned returns; directly inspected returns enter from quarantine. Saleable grades follow the normal packing flow.',
+    fields:[date,{key:'sourceType',label:'Source type',type:'select',options:['Purchase','Return'],required:true},ref('lot','Source receipt / return'),products,{key:'grader',label:'Grader',required:true,list:true},number('input','Input KG',true),number('gradeA','Total Grade A',true),number('reject','After first check',true),number('gradeB','Grade B',true),number('trash','Rejected',true)],
     compute:()=>({}),validate:()=>null,
     seed:[
       {...common,sourceType:'Purchase',lot:'GRN-1001',item:JSON.stringify([{p:'Tomato',q:200,a:150,a2:20,b:20},{p:'Onion',q:120,a:100,a2:5,b:10}]),grader:'Karthik M, Divya R',status:'Stage 2 done'},
@@ -102,8 +102,17 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
     ]
   },
   'sales-orders':{
-    description:'Select a buyer and their demand; packed stock is sent in bags to match the demand. Stock leaves once at dispatch.',
-    fields:[date,ref('buyer','Buyer'),ref('po','Buyer demand'),products,number('qty','Actual supply KG',true),{key:'bags',label:'Pack to send (from demand)',type:'textarea',readOnly:true},{key:'rate',label:'Sale price / KG',type:'number',money:true,required:true},{key:'value',label:'Sale value',type:'number',money:true,readOnly:true,list:true},person],
+    description:'Set a selling price per product in ₹/KG. Each product line and the order total flow to invoices and buyer ledgers.',
+    fields:[date,ref('buyer','Buyer'),ref('po','Buyer demand'),{...products,label:'Products · KG & selling price / KG'},number('qty','Actual supply KG',true),{key:'bags',label:'Pack to send (from demand)',type:'textarea',readOnly:true},{key:'rate',label:'Weighted average sale price / KG',type:'number',money:true,readOnly:true},{key:'value',label:'Sale value',type:'number',money:true,readOnly:true,list:true},person],
+    compute:(r)=> {
+      const saleLines = parseLines(r['item']);
+      if (!saleLines.some(line => line.saleRate !== undefined)) {
+        return { value: Math.round((Number(r['qty']) || 0) * (Number(r['rate']) || 0)) };
+      }
+      const qty = saleLines.reduce((sum, line) => sum + line.q, 0);
+      const value = saleLines.reduce((sum, line) => sum + line.q * (Number(line.saleRate) || 0), 0);
+      return { rate: qty > 0 ? Math.round((value / qty) * 100) / 100 : 0, value: Math.round(value) };
+    },
     seed:[
       {...common,packing:'PK-1001',po:'PO-1001',buyer:'FreshMart Retail',item:item('Tomato',23),qty:23,rate:42,value:966,status:'Dispatched'},
       {...common,packing:'PK-1002',po:'PO-1003',buyer:'Nilgiris Supermarket',item:item('Potato',100),qty:100,rate:100,value:10000,status:'Closed'},
@@ -113,31 +122,36 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
   returns:{
     title:'Sales returns & quarantine',
     description:'Returns stay in inspection quarantine until their quality check approves a saleable grade.',
-    fields:[date,ref('sale','Original sale'),{key:'buyer',label:'Buyer',readOnly:true,list:true},products,number('qty','Returned KG',true),{key:'reason',label:'Return reason',type:'select',options:['Quality issue','Excess supply','Wrong item'],required:true,list:true},person],
+    fields:[date,ref('sale','Original sale'),{key:'salesDc',label:'Original Sales DC',readOnly:true,list:true},{key:'buyer',label:'Buyer',readOnly:true,list:true},products,number('qty','Returned KG',true),{key:'reason',label:'Return reason',type:'select',options:['Quality issue','Excess supply','Wrong item'],required:true,list:true},person],
     seed:[
-      {...common,sale:'SO-1001',buyer:'FreshMart Retail',item:item('Tomato',3),qty:3,reason:'Quality issue',status:'Received'}
+      {...common,sale:'SO-1001',salesDc:'SDC-1001',buyer:'FreshMart Retail',warehouse:'Main Warehouse (Udumalaipet)',item:item('Tomato',3),qty:3,reason:'Quality issue',status:'Received'},
+      {date:'2026-10-24',responsible:'Priya S',sale:'SO-1002',salesDc:'SDC-1002',buyer:'Nilgiris Supermarket',warehouse:'Pollachi Depot',item:item('Potato',2),qty:2,reason:'Excess supply',status:'Return DC created'}
     ]
   },
   dispatch:{
     title:'Outward dispatch & delivery',
     description:'Buyer deliveries linked to dispatched sales and transporter records.',
-    fields:[date,ref('so','Dispatched sale'),{key:'buyer',label:'Buyer',readOnly:true,list:true},number('qty','Loading KG'),ref('transporter','Transporter'),{key:'vehicle',label:'Vehicle number',required:true},{key:'driver',label:'Driver',required:true},{key:'charges',label:'Transport charges',type:'number',money:true,list:true},person],
+    fields:[date,ref('so','Sales order number'),{key:'buyer',label:'Buyer',readOnly:true,list:true},{key:'toLocation',label:'To location',readOnly:true,list:true},{...products,label:'Products in this sale',readOnly:true},number('qty','Loading KG'),ref('transporter','Transporter'),{key:'vehicle',label:'Vehicle number',required:true},{key:'driver',label:'Driver',required:true},{key:'charges',label:'Transport charges',type:'number',money:true,list:true},person],
     seed:[
-      {...common,so:'SO-1001',buyer:'FreshMart Retail',qty:23,transporter:'Chennai Fresh Logistics',vehicle:'TN 09 AB 1234',driver:'Raja',charges:250,status:'Delivered'},
-      {...common,so:'SO-1002',buyer:'Nilgiris Supermarket',qty:100,transporter:'Chennai Fresh Logistics',vehicle:'TN 09 AB 1234',driver:'Raja',charges:450,status:'Delivered'},
+      {...common,so:'SO-1001',buyer:'FreshMart Retail',toLocation:'Udumalaipet',warehouse:'Main Warehouse (Udumalaipet)',item:item('Tomato',23),qty:23,transporter:'Kongu Agri Logistics',vehicle:'TN 78 AB 1234',driver:'Raja',charges:250,status:'Delivered'},
+      {...common,so:'SO-1002',buyer:'Nilgiris Supermarket',toLocation:'Pollachi',warehouse:'Pollachi Depot',item:item('Potato',100),qty:100,transporter:'Pollachi Express Cargo',vehicle:'TN 41 CD 5678',driver:'Ganesh',charges:450,status:'Delivered'},
+      {date:'2026-10-24',responsible:'Ravi Kumar',so:'SO-1003',buyer:'Hotel Saravana Bhavan',toLocation:'Coimbatore',warehouse:'Main Warehouse (Udumalaipet)',item:item('Onion',40),qty:40,transporter:'Anamalai Roadways',vehicle:'TN 39 EF 9012',driver:'Suresh',charges:300,status:'In transit'},
     ]
   },
   deliveries:{
+    description:'Record buyer acceptance and product-level issues against an outward Sales DC.',
+    fields:[{key:'dc',label:'Sales DC',type:'select',required:true,list:true},{key:'buyer',label:'Buyer',type:'text',readOnly:true,list:true},{key:'item',label:'Products sent',type:'products',readOnly:true,list:true},{key:'accepted',label:'Accepted qty',type:'number',list:true,suffix:'kg'},{key:'issueQty',label:'Issue qty',type:'number',list:true,suffix:'kg'},{key:'remarks',label:'Remarks',type:'textarea'},person],
     seed:[
       {dc:'SDC-1001',buyer:'FreshMart Retail',accepted:20,issueQty:3,remarks:'3 kg soft/damaged in transit',status:'Signed'},
       {dc:'SDC-1002',buyer:'Nilgiris Supermarket',accepted:100,issueQty:0,remarks:'Delivered in full, grade verified',status:'Signed'},
     ]
   },
   invoices:{
-    description:'Sales invoice values linked to dispatch; no second stock deduction.',
+    description:'Sales invoice values and product-level selling rates copied from the linked sales order; no second stock deduction.',
+    fields:[{key:'so',label:'Sales order',type:'select',list:true},{key:'dc',label:'Sales DC',type:'select',list:true},{key:'buyer',label:'Buyer',type:'text',readOnly:true,list:true},date,{key:'item',label:'Products & selling price / KG',type:'products',readOnly:true,list:true},{key:'taxable',label:'Taxable value',type:'number',money:true,readOnly:true},{key:'gst',label:'GST %',type:'select',options:['0','5','12','18']},{key:'total',label:'Invoice total',type:'number',money:true,readOnly:true,list:true},{key:'paid',label:'Received',type:'number',money:true,list:true}],
     seed:[
-      {dc:'SDC-1001',buyer:'FreshMart Retail',date:'2026-10-22',taxable:966,gst:'0',total:966,paid:840,status:'Part paid'},
-      {dc:'SDC-1002',buyer:'Nilgiris Supermarket',date:'2026-10-22',taxable:10000,gst:'0',total:10000,paid:10000,status:'Paid'},
+      {so:'SO-1001',dc:'SDC-1001',buyer:'FreshMart Retail',date:'2026-10-22',item:item('Tomato',23),taxable:966,gst:'0',total:966,paid:840,status:'Part paid'},
+      {so:'SO-1002',dc:'SDC-1002',buyer:'Nilgiris Supermarket',date:'2026-10-22',item:item('Potato',100),taxable:10000,gst:'0',total:10000,paid:10000,status:'Paid'},
     ]
   },
   'supplier-prices':{

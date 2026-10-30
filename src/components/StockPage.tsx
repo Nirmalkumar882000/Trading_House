@@ -1,28 +1,338 @@
 import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { Boxes, Download, Search, ArrowRight, RotateCcw, Package, CheckCircle2, AlertTriangle, Layers, MapPin, Building2 } from 'lucide-react';
+import { Boxes, Download, Search, ArrowRight, ArrowDownLeft, ArrowUpRight, RotateCcw, Package, CheckCircle2, AlertTriangle, Layers, MapPin, Building2, Eye } from 'lucide-react';
 import { Button } from './ui/button';
 import { useStore } from '@/lib/store';
-import { lines, movements, stock, type Category, locations } from '@/lib/workflow';
-import { PRODUCT_CATALOG, type ModuleDef, WAREHOUSES, DEFAULT_WAREHOUSE } from '@/lib/modules';
+import { lines, movements, stock, warehouseFlowRows as getWarehouseFlowRows, type Category, type WarehouseFlowRow, locations } from '@/lib/workflow';
+import { PRODUCT_CATALOG, type ModuleDef, type Row, WAREHOUSES, DEFAULT_WAREHOUSE } from '@/lib/modules';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
+import { WarehouseReceiptDialog } from './WarehouseReceiptDialog';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 
 const kg = (v: number) => `${v.toLocaleString('en-IN', { maximumFractionDigits: 3 })} kg`;
+const completedWarehouseStatuses = new Set([
+  'Posted',
+  'Received',
+  'Sent to QC',
+  'Delivered',
+  'Dispatched',
+  'Closed',
+]);
+
+function WarehouseFlowPanel({
+  tab,
+  onTabChange,
+  rows,
+  inwardRows,
+  outwardRows,
+  selectedWarehouse,
+  onWarehouseChange,
+  onNewReceipt,
+  onViewReturn,
+  searchQuery,
+  statusFilter,
+  onStatusFilterChange,
+}: {
+  tab: 'Inward' | 'Outward';
+  onTabChange: (tab: 'Inward' | 'Outward') => void;
+  rows: WarehouseFlowRow[];
+  inwardRows: WarehouseFlowRow[];
+  outwardRows: WarehouseFlowRow[];
+  selectedWarehouse: string;
+  onWarehouseChange: (warehouse: string) => void;
+  onNewReceipt: () => void;
+  onViewReturn: (returnId: string) => void;
+  searchQuery: string;
+  statusFilter: string;
+  onStatusFilterChange: (status: string) => void;
+}) {
+  const [dispatchDetails, setDispatchDetails] = useState<WarehouseFlowRow | null>(null);
+  const inwardKg = inwardRows
+    .filter((row) => ['Posted', 'Received', 'Sent to QC'].includes(row.status))
+    .reduce((sum, row) => sum + row.qty, 0);
+  const outwardKg = outwardRows.reduce((sum, row) => sum + row.qty, 0);
+  const standardStatuses = tab === 'Inward'
+    ? ['Arrived', 'Weighed', 'Validated', 'Posted', 'Received', 'Sent to QC']
+    : ['Created', 'Trip assigned', 'In transit', 'Delivered', 'Dispatched', 'Closed', 'Requested', 'Return DC created'];
+  const statuses = [...standardStatuses, ...new Set(rows.map((row) => row.status).filter((status) => !standardStatuses.includes(status)))];
+  const matchingRows = rows.filter((row) =>
+    [row.reference, row.sourceReference, row.product, row.party, row.reason || '', row.status, row.warehouse]
+      .some((value) => value.toLowerCase().includes(searchQuery.toLowerCase()))
+  );
+  const shownRows = matchingRows.filter((row) => statusFilter === 'All' || row.status === statusFilter);
+
+  return (
+    <section className="overflow-hidden rounded-2xl border bg-card shadow-card">
+      <div className="border-b bg-muted/20 p-4 sm:p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className={cn(
+              'grid size-10 shrink-0 place-items-center rounded-xl',
+              tab === 'Inward' ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : 'bg-blue-500/10 text-blue-700 dark:text-blue-300'
+            )}>
+              {tab === 'Inward' ? <ArrowDownLeft className="size-5" /> : <ArrowUpRight className="size-5" />}
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-primary">Warehouse operations</p>
+              <h2 className="mt-0.5 text-lg font-bold text-foreground">{tab} records</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {tab === 'Inward'
+                  ? 'Track posted purchase receipts and buyer returns received into quarantine.'
+                  : 'Track sales dispatches plus buyer return pickups, quarantine check-ins, and QC status.'}
+              </p>
+            </div>
+          </div>
+          <Button type="button" size="sm" className="h-8" onClick={onNewReceipt}>
+              {tab === 'Inward' ? 'New Inward GRN' : 'Buyer Returns & Quarantine'}
+              <ArrowRight className="ml-1.5 size-3.5" />
+          </Button>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="inline-flex rounded-xl border bg-background p-1" role="group" aria-label="Warehouse direction">
+            {([
+              { name: 'Inward', icon: ArrowDownLeft, quantity: inwardKg, count: inwardRows.length },
+              { name: 'Outward', icon: ArrowUpRight, quantity: outwardKg, count: outwardRows.length },
+            ] as const).map(({ name, icon: Icon, quantity, count }) => {
+              const isSelected = tab === name;
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  aria-pressed={isSelected}
+                  onClick={() => onTabChange(name)}
+                  className={cn(
+                    'flex min-w-36 items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors sm:min-w-44',
+                    isSelected
+                      ? name === 'Inward'
+                        ? 'bg-emerald-500/10 text-emerald-800 dark:text-emerald-200'
+                        : 'bg-blue-500/10 text-blue-800 dark:text-blue-200'
+                      : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground'
+                  )}
+                >
+                  <Icon className="size-4 shrink-0" />
+                  <span className="min-w-0">
+                    <span className="block text-sm font-bold">{name}</span>
+                    <span className="block text-[10px] text-muted-foreground">{count} product lines · {kg(quantity)}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5" aria-label="Filter by warehouse">
+            {['All', ...WAREHOUSES].map((warehouse) => {
+              const isSelected = selectedWarehouse === warehouse;
+              return (
+                <button
+                  key={warehouse}
+                  type="button"
+                  onClick={() => onWarehouseChange(warehouse)}
+                  aria-pressed={isSelected}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors',
+                    isSelected ? 'bg-primary text-primary-foreground' : 'bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground'
+                  )}
+                >
+                  <Building2 className="size-3" />
+                  {warehouse === 'All' ? 'All Warehouses' : warehouse}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b p-3">
+        <p className="text-xs font-semibold text-muted-foreground">
+          Filter {tab.toLowerCase()} records by workflow status
+        </p>
+        <div className="flex max-w-full flex-wrap gap-1 rounded-xl bg-muted/70 p-1" role="group" aria-label={`${tab} status filter`}>
+          {['All', ...statuses].map((status) => {
+            const count = status === 'All' ? rows.length : rows.filter((row) => row.status === status).length;
+            const selected = statusFilter === status;
+            return (
+              <button
+                key={status}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => onStatusFilterChange(status)}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition-colors',
+                  selected ? 'bg-card text-foreground shadow-xs' : 'text-muted-foreground hover:bg-card/70 hover:text-foreground'
+                )}
+              >
+                {status}
+                <span className={cn(
+                  'rounded-full px-1.5 py-0.5 font-mono text-[9px]',
+                  selected ? 'bg-primary/10 text-primary' : 'bg-background/70 text-muted-foreground'
+                )}>{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
+        <p className="flex items-center gap-2 text-xs font-semibold text-foreground">
+          {tab === 'Inward'
+            ? <ArrowDownLeft className="size-4 text-emerald-600" />
+            : <ArrowUpRight className="size-4 text-blue-600" />}
+          {tab} Warehouse Records
+        </p>
+        <span className="text-[11px] text-muted-foreground">
+          {selectedWarehouse === 'All' ? 'All warehouse locations' : selectedWarehouse} · Showing {shownRows.length} of {matchingRows.length} matching product lines
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[850px] text-sm">
+          <thead className="bg-muted/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <tr>
+              <th className="px-4 py-2.5">Date</th>
+              <th className="px-4 py-2.5">{tab === 'Inward' ? 'GRN / Return DC' : 'Sales DC / Return DC'}</th>
+              <th className="px-4 py-2.5">Source Reference</th>
+              <th className="px-4 py-2.5">{tab === 'Inward' ? 'Supplier / Buyer' : 'Buyer'}</th>
+              <th className="px-4 py-2.5">Product</th>
+              <th className="px-4 py-2.5 text-right">Quantity</th>
+              <th className="px-4 py-2.5">Warehouse</th>
+              <th className="px-4 py-2.5">Status</th>
+              <th className="px-4 py-2.5 text-right">Details</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {shownRows.map((row) => (
+              <tr key={row.id} className="hover:bg-muted/20">
+                <td className="whitespace-nowrap px-4 py-3 text-xs text-muted-foreground">{row.date || '—'}</td>
+                <td className="whitespace-nowrap px-4 py-3 font-mono text-xs font-semibold text-primary">
+                  {row.reference}
+                  {row.flowType === 'Buyer return pickup' && (
+                    <span className="mt-1 block font-sans text-[9px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">Return pickup</span>
+                  )}
+                  {row.flowType === 'Buyer return quarantine' && (
+                    <span className="mt-1 block font-sans text-[9px] font-semibold uppercase tracking-wide text-blue-700 dark:text-blue-300">Quarantine / QC</span>
+                  )}
+                </td>
+                <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-muted-foreground">{row.sourceReference}</td>
+                <td className="px-4 py-3 text-xs font-medium">{row.party}</td>
+                <td className="px-4 py-3 text-xs font-semibold">
+                  {row.product}
+                  {row.reason && <span className="mt-0.5 block text-[10px] font-normal text-muted-foreground">Return reason: {row.reason}</span>}
+                </td>
+                <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-xs font-bold">{kg(row.qty)}</td>
+                <td className="whitespace-nowrap px-4 py-3 text-xs text-muted-foreground">{row.warehouse}</td>
+                <td className="whitespace-nowrap px-4 py-3">
+                  <span className={cn(
+                    'rounded-full border px-2 py-0.5 text-[10px] font-semibold',
+                    completedWarehouseStatuses.has(row.status)
+                      ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                      : 'border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                  )}>{row.status}</span>
+                </td>
+                <td className="whitespace-nowrap px-4 py-3 text-right">
+                  {row.flowType === 'Buyer return pickup' || row.flowType === 'Buyer return quarantine' ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => onViewReturn(row.reference)}
+                    >
+                      <Eye className="mr-1 size-3.5" />
+                      View
+                    </Button>
+                  ) : row.flowType === 'Dispatch' ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => setDispatchDetails(row)}
+                    >
+                      <Eye className="mr-1 size-3.5" />
+                      View
+                    </Button>
+                  ) : <span className="text-xs text-muted-foreground">—</span>}
+                </td>
+              </tr>
+            ))}
+            {!shownRows.length && (
+              <tr>
+                <td colSpan={9} className="px-4 py-10 text-center">
+                  <p className="text-sm font-semibold text-foreground">
+                    {rows.length && statusFilter !== 'All' ? `No ${statusFilter} ${tab.toLowerCase()} records found` : `No ${tab.toLowerCase()} records found`}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {rows.length && statusFilter !== 'All'
+                      ? 'Choose another status or select All to view the other records.'
+                      : tab === 'Inward'
+                      ? 'Post a warehouse receipt or receive a buyer return into quarantine to see it here.'
+                      : 'Dispatch a confirmed sale or create a buyer return DC to see its pickup and quarantine progress here.'}
+                  </p>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <Dialog open={dispatchDetails !== null} onOpenChange={(open) => {
+        if (!open) setDispatchDetails(null);
+      }}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Outward dispatch details</DialogTitle>
+            <DialogDescription>
+              Sales DC {dispatchDetails?.reference || "—"} · Sales order {dispatchDetails?.sourceReference || "—"}
+            </DialogDescription>
+          </DialogHeader>
+          {dispatchDetails && (
+            <div className="space-y-4 text-sm">
+              <dl className="grid gap-3 rounded-xl border bg-muted/20 p-4 sm:grid-cols-2">
+                <div><dt className="text-xs text-muted-foreground">Buyer</dt><dd className="font-semibold">{dispatchDetails.party}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Delivery location</dt><dd className="font-semibold">{dispatchDetails.deliveryLocation || "—"}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">From warehouse</dt><dd className="font-semibold">{dispatchDetails.warehouse}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Dispatch status</dt><dd className="font-semibold">{dispatchDetails.status}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Transporter</dt><dd className="font-semibold">{dispatchDetails.transporter || "—"}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Vehicle / driver</dt><dd className="font-semibold">{[dispatchDetails.vehicle, dispatchDetails.driver].filter(Boolean).join(" · ") || "—"}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Dispatch date</dt><dd className="font-semibold">{dispatchDetails.date || "—"}</dd></div>
+              </dl>
+              <div className="overflow-hidden rounded-xl border">
+                <div className="border-b bg-muted/40 px-3 py-2 text-xs font-semibold">Products on this Sales DC</div>
+                <div className="divide-y">
+                  {(dispatchDetails.products || [{ p: dispatchDetails.product, q: dispatchDetails.qty }]).map((product, index) => (
+                    <div key={`${product.p}-${index}`} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                      <span className="font-medium">{product.p}</span>
+                      <span className="font-mono font-semibold">{kg(product.q)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </section>
+  );
+}
 
 export function StockPage({ mod }: { mod: ModuleDef }) {
-  const { data, reset } = useStore();
+  const { data, reset, nextId, upsert } = useStore();
   const [q, setQ] = useState('');
   const [category, setCategory] = useState('All');
   const [hideZero, setHideZero] = useState(true);
   const [selectedWarehouse, setSelectedWarehouse] = useState<string>('All');
+  const [warehouseFlowTab, setWarehouseFlowTab] = useState<'Inward' | 'Outward'>('Inward');
+  const [warehouseStatusFilter, setWarehouseStatusFilter] = useState('All');
+  const [receiptDialogRow, setReceiptDialogRow] = useState<Row | null>(null);
+  const [returnDialogRow, setReturnDialogRow] = useState<Row | null>(null);
 
   const balances = stock(data, selectedWarehouse);
   const allMoves = movements(data);
   const ledger = selectedWarehouse === 'All' ? allMoves : allMoves.filter((m) => m.warehouse === selectedWarehouse);
   const isInventory = mod.slug === 'inventory';
   const isLedger = mod.slug === 'stock-movements';
-
+  const inwardRows = getWarehouseFlowRows(data, 'Inward', selectedWarehouse);
+  const outwardRows = getWarehouseFlowRows(data, 'Outward', selectedWarehouse);
   // Total KG by warehouse facility for instant overview
   const warehouseStockSummary = WAREHOUSES.map((wh) => {
     const whBalances = stock(data, wh);
@@ -155,6 +465,66 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
         </div>
       </div>
 
+      {isInventory && (
+        <WarehouseFlowPanel
+          tab={warehouseFlowTab}
+          onTabChange={(direction) => {
+            setWarehouseFlowTab(direction);
+            setWarehouseStatusFilter('All');
+          }}
+          rows={warehouseFlowTab === 'Inward' ? inwardRows : outwardRows}
+          inwardRows={inwardRows}
+          outwardRows={outwardRows}
+          selectedWarehouse={selectedWarehouse}
+          onWarehouseChange={setSelectedWarehouse}
+          searchQuery={q}
+          statusFilter={warehouseStatusFilter}
+          onStatusFilterChange={setWarehouseStatusFilter}
+          onNewReceipt={() => setReceiptDialogRow({
+            id: nextId('receipts'),
+            status: 'Arrived',
+            date: new Date().toISOString().slice(0, 10),
+            item: '[]',
+          })}
+          onViewReturn={(returnId) => {
+            const returnRecord = (data['returns'] || []).find((record) => record.id === returnId);
+            if (!returnRecord) {
+              toast.error(`Return ${returnId} could not be found.`);
+              return;
+            }
+            setReturnDialogRow(returnRecord);
+          }}
+        />
+      )}
+      {returnDialogRow && (
+        <WarehouseReceiptDialog
+          row={returnDialogRow}
+          isNew={false}
+          initialFlow="BuyerReturn"
+          onClose={() => setReturnDialogRow(null)}
+          onSave={(updatedReturn) => {
+            upsert('returns', updatedReturn);
+            setReturnDialogRow(null);
+            toast.success(`${updatedReturn.id} received into warehouse quarantine.`);
+          }}
+        />
+      )}
+      {receiptDialogRow && (
+        <WarehouseReceiptDialog
+          row={receiptDialogRow}
+          isNew
+          initialFlow={warehouseFlowTab === 'Inward' ? 'Purchase' : 'BuyerReturn'}
+          onClose={() => setReceiptDialogRow(null)}
+          onSave={(receipt) => {
+            upsert('receipts', receipt);
+            setReceiptDialogRow(null);
+            toast.success(receipt.status === 'Posted'
+              ? `${receipt.id} posted to warehouse inventory.`
+              : `${receipt.id} saved as an arrival awaiting posting.`);
+          }}
+        />
+      )}
+
       {/* End-to-end Inventory Process Pipeline Banner */}
       <div className="rounded-2xl border border-primary/20 bg-gradient-to-r from-primary/5 via-card to-background p-4 shadow-xs space-y-2.5">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
@@ -238,48 +608,6 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
             </button>
           );
         })}
-      </div>
-
-      {/* Multi-Warehouse Filter Facility Pills */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-card p-3.5 shadow-xs">
-        <div className="flex items-center gap-2.5">
-          <div className="grid size-9 place-items-center rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400">
-            <Building2 className="size-4" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold text-foreground">Receiving Warehouse:</span>
-              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">
-                {selectedWarehouse === 'All' ? 'Consolidated All Bays' : selectedWarehouse}
-              </span>
-            </div>
-            <p className="text-[11px] text-muted-foreground">
-              Filter balances, incoming lots, and stock movements by warehouse depot
-            </p>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-1.5">
-          {['All', ...WAREHOUSES].map((wh) => {
-            const isSel = selectedWarehouse === wh;
-            return (
-              <button
-                key={wh}
-                type="button"
-                onClick={() => setSelectedWarehouse(wh)}
-                className={cn(
-                  'inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all',
-                  isSel
-                    ? 'bg-primary text-primary-foreground shadow-xs'
-                    : 'bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground'
-                )}
-              >
-                <Building2 className="size-3" />
-                <span>{wh === 'All' ? 'All Warehouses' : wh}</span>
-              </button>
-            );
-          })}
-        </div>
       </div>
 
       {/* Filter and Action Toolbar */}

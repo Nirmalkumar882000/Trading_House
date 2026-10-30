@@ -222,16 +222,29 @@ export function TransportPage({ mod }: { mod: ModuleDef }) {
     const nextStatus = statuses[currentIndex + 1];
 
     const updated = normalize("transport", { ...r, status: nextStatus });
-    const err = validateData({
+    const linkedReturn = updated["direction"] === "Outward Return" && nextStatus === "Delivered"
+      ? (data["returns"] || []).find((record) => record.id === updated["ref"])
+      : undefined;
+    const receivedReturn = linkedReturn && ["Requested", "Return DC created"].includes(linkedReturn.status)
+      ? normalize("returns", { ...linkedReturn, status: "Received" })
+      : undefined;
+    const candidateData = {
       ...data,
       transport: rows.map((x) => (x.id === updated.id ? updated : x)),
-    });
+      ...(receivedReturn
+        ? { returns: (data["returns"] || []).map((record) => record.id === receivedReturn.id ? receivedReturn : record) }
+        : {}),
+    };
+    const err = validateData(candidateData);
     if (err) {
       toast.error(err);
       return;
     }
+    if (receivedReturn) upsert("returns", receivedReturn);
     upsert("transport", updated);
-    toast.success(`Trip ${r.id} advanced to "${nextStatus}"`);
+    toast.success(receivedReturn
+      ? `Trip ${r.id} delivered; return ${receivedReturn.id} received into warehouse quarantine.`
+      : `Trip ${r.id} advanced to "${nextStatus}"`);
   };
 
   // WhatsApp gate pass sharing
@@ -2222,8 +2235,8 @@ function OutwardReturnModal({
   onSave: (returnRecord: Row, transportRecord: Row) => void;
 }) {
   const { nextId } = useStore();
-  const salesOrders = data["sales-orders"] || [];
-  const buyers = (data["buyers"] || []).map((b) => String(b["name"]));
+  const salesOrders = (data["sales-orders"] || []).filter((sale) => ["Dispatched", "Closed"].includes(sale.status));
+  const buyers = [...new Set(salesOrders.map((sale) => String(sale["buyer"] || "")).filter(Boolean))];
   const transporters = data["transporters"] || [];
 
   const [selectedBuyer, setSelectedBuyer] = useState<string>(
@@ -2231,38 +2244,40 @@ function OutwardReturnModal({
   );
 
   // Filter sales orders for selected buyer
-  const buyerSalesOrders = useMemo(() => {
-    return salesOrders.filter((s) => !selectedBuyer || s["buyer"] === selectedBuyer);
-  }, [salesOrders, selectedBuyer]);
+  const buyerSalesOrders = salesOrders.filter((s) => !selectedBuyer || s["buyer"] === selectedBuyer);
 
   const [selectedSoId, setSelectedSoId] = useState<string>(
     buyerSalesOrders[0]?.id || salesOrders[0]?.id || ""
   );
 
   // Current selected sales order
-  const currentSo = useMemo(() => {
-    return salesOrders.find((s) => s.id === selectedSoId) || buyerSalesOrders[0] || salesOrders[0];
-  }, [salesOrders, selectedSoId, buyerSalesOrders]);
+  const currentSo = buyerSalesOrders.find((s) => s.id === selectedSoId) || buyerSalesOrders[0];
 
-  // Return items state: map each product with returnQty
+  // Return items state: map each product to the remaining returnable quantity.
   const [returnItems, setReturnItems] = useState<{ p: string; maxQ: number; q: number; r: number; reason: string }[]>([]);
+  const returnRows = data["returns"];
 
   // When currentSo changes, update returnItems
   useEffect(() => {
     if (currentSo) {
-      const items = lines(currentSo).map((l) => ({
-        p: l.p,
-        maxQ: l.q,
-        q: Math.min(l.q, 5), // default sample return
-        r: l.r || 40,
-        reason: "Quality issue",
-      }));
-      setReturnItems(items.length > 0 ? items : [{ p: "Tomato", maxQ: 25, q: 5, r: 40, reason: "Quality issue" }]);
+      const items = lines(currentSo).map((l) => {
+        const alreadyReturned = (returnRows || [])
+          .filter((record) => record["sale"] === currentSo.id)
+          .reduce((sum, record) => sum + (lines(record).find((line) => line.p === l.p)?.q || 0), 0);
+        return {
+          p: l.p,
+          maxQ: Math.max(0, l.q - alreadyReturned),
+          q: 0,
+          r: l.r || 0,
+          reason: "Quality issue",
+        };
+      });
+      setReturnItems(items);
       if (currentSo["buyer"] && currentSo["buyer"] !== selectedBuyer) {
         setSelectedBuyer(String(currentSo["buyer"]));
       }
     }
-  }, [currentSo?.id]);
+  }, [currentSo, returnRows, selectedBuyer]);
 
   const [containerCount, setContainerCount] = useState<number>(4);
   const [primaryReason, setPrimaryReason] = useState<string>("Quality issue");
@@ -2351,7 +2366,7 @@ function OutwardReturnModal({
                   const b = e.target.value;
                   setSelectedBuyer(b);
                   const firstSo = salesOrders.find((s) => s["buyer"] === b);
-                  if (firstSo) setSelectedSoId(firstSo.id);
+                  setSelectedSoId(firstSo?.id || "");
                 }}
                 className="w-full rounded-lg border bg-background px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-primary/20"
               >
@@ -2617,7 +2632,7 @@ function OutwardReturnModal({
               // Validate no item exceeds maxQ
               const invalidItem = activeItems.find((i) => i.q > i.maxQ);
               if (invalidItem) {
-                toast.error(`${invalidItem.p}: returned quantity (${invalidItem.q} kg) exceeds original sale (${invalidItem.maxQ} kg)`);
+                toast.error(`${invalidItem.p}: return quantity (${invalidItem.q} kg) exceeds the remaining returnable quantity (${invalidItem.maxQ} kg)`);
                 return;
               }
 
@@ -2641,12 +2656,15 @@ function OutwardReturnModal({
                 id: retId,
                 date: new Date().toISOString().slice(0, 10),
                 sale: currentSo.id,
+                salesDc: (data["dispatch"] || []).find((dispatch) => dispatch["so"] === currentSo.id)?.id || "",
                 buyer: selectedBuyer,
                 item: JSON.stringify(activeItems.map((i) => ({ p: i.p, q: Number(i.q), r: Number(i.r) }))),
                 qty: totalReturnedKg,
                 reason: primaryReason,
-                status: "Received",
+                status: "Return DC created",
                 responsible: "Ravi Kumar",
+                transportId: movId,
+                warehouse: "Main Warehouse (Udumalaipet)",
               };
 
               const transportRecord: Row = {
@@ -2665,7 +2683,7 @@ function OutwardReturnModal({
                 driverPhone,
                 charges,
                 status: "Scheduled",
-                dc: `RET-DC-${retId.replace("RDC-", "")}`,
+                dc: retId,
                 responsible: "Ravi Kumar",
               };
 
@@ -2680,4 +2698,3 @@ function OutwardReturnModal({
     </div>
   );
 }
-

@@ -202,6 +202,7 @@ export function LedgersPage({ mod }: { mod?: ModuleDef }) {
     const rawEntries: LedgerEntry[] = [];
     const invoices = data["invoices"] ?? [];
     const salesOrders = data["sales-orders"] ?? [];
+    const dispatches = data["dispatch"] ?? [];
     const receipts = data["buyer-payments"] ?? [];
     const creditNotes = data["credit-notes"] ?? [];
     const returns = data["returns"] ?? [];
@@ -217,8 +218,18 @@ export function LedgersPage({ mod }: { mod?: ModuleDef }) {
       if (dcRef) invoicedSaleOrderIds.add(dcRef);
 
       // Check if this invoice links to a known SO directly
-      const matchingSo = salesOrders.find(so => so.id === dcRef || (data["dispatch"] ?? []).some(d => d.id === dcRef && d["so"] === so.id));
+      const dispatch = dispatches.find(d => d.id === dcRef);
+      const matchingSo = salesOrders.find(so => so.id === dcRef || so.id === dispatch?.["so"]);
       if (matchingSo) invoicedSaleOrderIds.add(matchingSo.id);
+      const invoiceLines = parseLines(inv["item"]).length > 0
+        ? parseLines(inv["item"])
+        : matchingSo ? lines(matchingSo) : [];
+      const itemDetails = invoiceLines.map((line) => {
+        const rate = num(line.saleRate) || num(matchingSo?.["rate"]);
+        return canViewPrice(role)
+          ? `${line.p}: ${line.q} kg @ ${fmtMoney(rate)}/kg = ${fmtMoney(line.q * rate)}`
+          : `${line.p}: ${line.q} kg`;
+      }).join("; ");
 
       rawEntries.push({
         id: inv.id,
@@ -226,7 +237,7 @@ export function LedgersPage({ mod }: { mod?: ModuleDef }) {
         ref: inv.id,
         party: buyer,
         type: "Tax Invoice",
-        particulars: `Sales Invoice against Dispatch ${inv["dc"] || "—"} (Taxable: ₹${inv["taxable"] || amt})`,
+        particulars: `Sales Invoice against Dispatch ${inv["dc"] || "—"}${itemDetails ? ` · ${itemDetails}` : ""} (Taxable: ${fmtMoney(num(inv["taxable"]) || amt)})`,
         debit: amt,
         credit: 0,
         balance: 0,
@@ -242,13 +253,19 @@ export function LedgersPage({ mod }: { mod?: ModuleDef }) {
         if (!isMatched) {
           const buyer = String(so["buyer"] || "Direct Buyer");
           const amt = num(so["value"]) || round(num(so["qty"]) * num(so["rate"]));
+          const itemDetails = lines(so).map((line) => {
+            const rate = num(line.saleRate) || num(so["rate"]);
+            return canViewPrice(role)
+              ? `${line.p}: ${line.q} kg @ ${fmtMoney(rate)}/kg = ${fmtMoney(line.q * rate)}`
+              : `${line.p}: ${line.q} kg`;
+          }).join("; ");
           rawEntries.push({
             id: so.id,
             date: String(so["date"] || "2026-10-22"),
             ref: so.id,
             party: buyer,
             type: "Sales Order",
-            particulars: `${lines(so).map(l => `${l.p} (${l.q} kg)`).join(", ")} @ ₹${so["rate"] || 0}/kg (Demand: ${so["po"] || "—"})`,
+            particulars: `${itemDetails || lines(so).map(l => `${l.p} (${l.q} kg)`).join(", ")} (Demand: ${so["po"] || "—"})`,
             debit: amt,
             credit: 0,
             balance: 0,
@@ -333,7 +350,7 @@ export function LedgersPage({ mod }: { mod?: ModuleDef }) {
     // Sort ascending by date
     rawEntries.sort((a, b) => a.date.localeCompare(b.date));
     return rawEntries;
-  }, [data]);
+  }, [data, role]);
 
   // Build Agent & Transporter Ledger Entries
   const agentLedger = useMemo<LedgerEntry[]>(() => {
@@ -455,27 +472,53 @@ export function LedgersPage({ mod }: { mod?: ModuleDef }) {
   // Open Invoices for selected buyer in modal
   const buyerOpenInvoices = useMemo(() => {
     const list = (data["invoices"] ?? []).filter(inv => inv["buyer"] === buyerParty);
+    const salesOrders = data["sales-orders"] ?? [];
+    const dispatches = data["dispatch"] ?? [];
+    const invoicedSales = new Set(list.flatMap((invoice) => {
+      const dispatch = dispatches.find((entry) => entry.id === invoice["dc"]);
+      const sale = salesOrders.find((entry) => entry.id === invoice["dc"] || entry.id === dispatch?.["so"]);
+      return sale ? [sale.id] : [];
+    }));
     // Also include sales orders if not yet invoiced
-    const sos = (data["sales-orders"] ?? []).filter(so => so["buyer"] === buyerParty && ["Dispatched", "Closed", "Confirmed"].includes(so.status));
+    const sos = salesOrders.filter(so =>
+      so["buyer"] === buyerParty &&
+      ["Dispatched", "Closed", "Confirmed"].includes(so.status) &&
+      !invoicedSales.has(so.id)
+    );
     const combined: { id: string; label: string; amount: number }[] = [];
     list.forEach(inv => {
+      const dispatch = dispatches.find((entry) => entry.id === inv["dc"]);
+      const sale = salesOrders.find((entry) => entry.id === inv["dc"] || entry.id === dispatch?.["so"]);
+      const invoiceLines = parseLines(inv["item"]).length > 0
+        ? parseLines(inv["item"])
+        : sale ? lines(sale) : [];
+      const saleDetails = invoiceLines.map((line) => {
+        const rate = num(line.saleRate) || num(sale?.["rate"]);
+        return canViewPrice(role)
+          ? `${line.p} ${line.q}kg @ ${fmtMoney(rate)}/kg`
+          : `${line.p} ${line.q}kg`;
+      }).join(", ");
       combined.push({
         id: inv.id,
-        label: `${inv.id} · Tax Invoice (₹${inv["total"] || inv["taxable"] || 0})`,
+        label: `${inv.id} · Tax Invoice${saleDetails ? ` · ${saleDetails}` : ""} (${fmtMoney(inv["total"] || inv["taxable"] || 0)})`,
         amount: num(inv["total"]) || num(inv["taxable"]) || 0
       });
     });
     sos.forEach(so => {
-      if (!list.some(inv => inv["dc"] === so.id)) {
-        combined.push({
-          id: so.id,
-          label: `${so.id} · Sales Order (${lines(so).map(l => l.p).join(", ")}) (₹${so["value"] || 0})`,
-          amount: num(so["value"])
-        });
-      }
+      const saleDetails = lines(so).map((line) => {
+        const rate = num(line.saleRate) || num(so["rate"]);
+        return canViewPrice(role)
+          ? `${line.p} ${line.q}kg @ ${fmtMoney(rate)}/kg`
+          : `${line.p} ${line.q}kg`;
+      }).join(", ");
+      combined.push({
+        id: so.id,
+        label: `${so.id} · Sales Order · ${saleDetails} (${fmtMoney(so["value"])})`,
+        amount: num(so["value"])
+      });
     });
     return combined;
-  }, [data, buyerParty]);
+  }, [data, buyerParty, role]);
 
   // Open Trips for selected supplier in modal
   const supplierOpenTrips = useMemo(() => {

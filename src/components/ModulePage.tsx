@@ -4,7 +4,8 @@ import { ArrowRight, Check, ChevronDown, Pencil, Plus, Search, Trash2, X, Downlo
 import { toast } from "sonner";
 import { fmtMoney, type Field, type ModuleDef, type Row, PRODUCT_CATALOG, getPackSpecOptions, totalPacketCount, DEFAULT_WAREHOUSE, WAREHOUSES } from "@/lib/modules";
 import { useStore } from "@/lib/store";
-import { canViewPrice, canEditPrice, maskPriceIfRestricted } from "@/lib/rbac";
+import { canViewPrice, canEditPrice, maskPriceIfRestricted, ROLES } from "@/lib/rbac";
+import type { UserRole } from "@/lib/rbac";
 
 function formatKgSpec(kg: number): string {
   if (kg === 0.25) return "0.25 kg";
@@ -23,12 +24,13 @@ import { ReturnContainerModal } from "./ReturnContainerModal";
 import { ContainerReturnChallanModal } from "./ContainerReturnChallanModal";
 import { ProductCatalogModal } from "./ProductCatalogModal";
 import { WarehouseReceiptDialog } from "./WarehouseReceiptDialog";
+import { InvoiceViewModal } from "./InvoiceViewModal";
 import { StatusBadge } from "./StatusBadge";
 import { cn } from "@/lib/utils";
 import { outstandingDemand } from "@/lib/sourcing";
 import { Button } from "./ui/button";
 import { EmployeeSelect } from "./EmployeeSelect";
-import { bagBreakdown, buysFromTrip, marketTripDemand, parseBuys, returnsAvailable, lines, normalize, num, parseLines, populate, referenceModule, stock, syncReceiptDownstream, total, validateData, round, type ProductLine } from "@/lib/workflow";
+import { bagBreakdown, buyerLocation, buysFromTrip, draftInvoiceForSalesOrder, invoiceForSalesOrder, marketTripDemand, parseBuys, returnsAvailable, lines, normalize, num, parseLines, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, syncReceiptDownstream, total, validateData, round, type ProductLine } from "@/lib/workflow";
 export { parseLines } from "@/lib/workflow";
 
 function getCreateButtonLabel(slug: string, title: string): string {
@@ -40,13 +42,13 @@ function getCreateButtonLabel(slug: string, title: string): string {
 }
 
 type Line = ProductLine;
-const fmt = (f: Field, v: unknown, role: string) => {
+const fmt = (f: Field, v: unknown, role: UserRole) => {
   if (v === undefined || v === "") return "—";
-  if ((f.money || f.key === "rate" || f.key === "amount" || f.key === "payable") && !canViewPrice(role as any)) {
+  if ((f.money || f.key === "rate" || f.key === "amount" || f.key === "payable") && !canViewPrice(role)) {
     return "•••• (Restricted)";
   }
   if (f.type === "buys") {
-    if (!canViewPrice(role as any)) {
+    if (!canViewPrice(role)) {
       return parseBuys(v).map((b) => `${b.s}: ${b.p} ${b.q} kg`).join(" · ") || "—";
     }
     return parseBuys(v).map((b) => `${b.s}: ${b.p} ${b.q} kg @ ${fmtMoney(b.r)}`).join(" · ") || "—";
@@ -71,8 +73,62 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
   const { data, role, upsert, remove, nextId, clearModule, catalog } = useStore();
   const [catalogOpen, setCatalogOpen] = useState(false);
 
-  const rows = useMemo(() => {
+  const rows = useMemo<Row[]>(() => {
     const baseRows = data[mod.slug] ?? [];
+    if (mod.slug === "supplier-prices") {
+      return supplierPricesFromTrips(data["trips"] ?? [], baseRows);
+    }
+    if (mod.slug === "sales-orders") {
+      const dispatches = data["dispatch"] ?? [];
+      const invoices = data["invoices"] ?? [];
+      return baseRows.map((sale) => {
+        const invoice = invoiceForSalesOrder(sale.id, dispatches, invoices);
+        return {
+          ...sale,
+          invoice: invoice ? `${invoice.id} · ${invoice.status || "Draft"}` : "Available after dispatch",
+        };
+      });
+    }
+    if (mod.slug === "dispatch") {
+      const salesOrders = data["sales-orders"] ?? [];
+      return baseRows.map((dispatch) => {
+        const sale = salesOrders.find((order) => order.id === dispatch["so"]);
+        const buyer = String(dispatch["buyer"] || sale?.["buyer"] || "");
+        return {
+          ...dispatch,
+          buyer,
+          toLocation: dispatch["toLocation"] || buyerLocation(buyer, data["buyers"] ?? []),
+          ...(sale && parseLines(dispatch["item"]).length === 0 ? { item: sale["item"] || "[]" } : {}),
+        };
+      });
+    }
+    if (mod.slug === "deliveries") {
+      const dispatches = data["dispatch"] ?? [];
+      return baseRows.map((delivery) => {
+        const dispatch = dispatches.find((entry) => entry.id === delivery["dc"]);
+        if (!dispatch) return delivery;
+        return {
+          ...delivery,
+          buyer: dispatch["buyer"] || delivery["buyer"] || "",
+          item: dispatch["item"] || delivery["item"] || "[]",
+        };
+      });
+    }
+    if (mod.slug === "returns") {
+      const salesOrders = data["sales-orders"] ?? [];
+      const dispatches = data["dispatch"] ?? [];
+      return baseRows.map((returnRecord) => {
+        const sale = salesOrders.find((entry) => entry.id === returnRecord["sale"]);
+        const dispatch = dispatches.find((entry) =>
+          entry.id === returnRecord["salesDc"] || entry["so"] === sale?.id
+        );
+        return {
+          ...returnRecord,
+          salesDc: returnRecord["salesDc"] || dispatch?.id || "",
+          buyer: returnRecord["buyer"] || sale?.["buyer"] || dispatch?.["buyer"] || "",
+        };
+      });
+    }
     if (mod.slug === "suppliers") {
       const trips = data["trips"] ?? [];
       const prices = data["supplier-prices"] ?? [];
@@ -142,6 +198,24 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
         return demand > 0 ? { ...trip, demand } : trip;
       });
     }
+    if (mod.slug === "invoices") {
+      const dispatches = data["dispatch"] ?? [];
+      const salesOrders = data["sales-orders"] ?? [];
+      return baseRows.map((invoice) => {
+        const dispatch = dispatches.find((entry) => entry.id === invoice["dc"]);
+        const sale = salesOrders.find((entry) => entry.id === (invoice["so"] || dispatch?.["so"]));
+        if (!sale) return invoice;
+        const saleRate = Number(invoice["rate"]) || Number(sale["rate"]) || 0;
+        const invoiceLines = parseLines(invoice["item"]);
+        const saleLines = parseLines(sale["item"]);
+        const displayedLines = invoiceLines.length > 0 ? invoiceLines : saleLines;
+        const item = JSON.stringify(displayedLines.map((line) => ({
+          ...line,
+          saleRate: line.saleRate ?? saleLines.find((saleLine) => saleLine.p === line.p)?.saleRate ?? saleRate,
+        })));
+        return { ...invoice, so: sale.id, item, rate: saleRate };
+      });
+    }
     return baseRows;
   }, [data, mod.slug]);
 
@@ -149,6 +223,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
   const [filter, setFilter] = useState("All");
   const [editing, setEditing] = useState<Row | null>(null);
   const [viewId, setViewId] = useState<string | null>(null);
+  const [supplierPricePopup, setSupplierPricePopup] = useState<Row | null>(null);
   const [challanRow, setChallanRow] = useState<Row | null>(null);
   const [scaleReceiptRow, setScaleReceiptRow] = useState<Row | null>(null);
   const [voucherReceiptRow, setVoucherReceiptRow] = useState<Row | null>(null);
@@ -156,9 +231,13 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
   const [demandRow, setDemandRow] = useState<Row | null>(null);
   const [returnContainerRow, setReturnContainerRow] = useState<Row | null>(null);
   const [returnChallanRow, setReturnChallanRow] = useState<Row | null>(null);
+  const [invoiceViewRow, setInvoiceViewRow] = useState<Row | null>(null);
   const view = rows.find((r) => r.id === viewId) ?? null;
   const cols = useMemo(() => {
     const base = mod.fields.filter((f) => f.list);
+    if (mod.slug === "sales-orders") {
+      return [...base, { key: "invoice", label: "Invoice", type: "text", list: true }];
+    }
     if (mod.slug !== "purchase-orders") return base;
     const itemIdx = base.findIndex((f) => f.key === "item");
     const packetsCol: Field = { key: "__packets", label: "Packet", type: "number" };
@@ -210,6 +289,11 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
 
   const save = (r: Row) => {
     const full = normalize(mod.slug, { ...r, ...(mod.compute?.(r) ?? {}) } as Row);
+    const previous = rows.find((x) => x.id === full.id);
+    if (mod.slug === "supplier-prices" && full.status === "Confirmed" && previous?.status !== "Priced" && previous?.status !== "Confirmed") {
+      toast.error("Save complete supplier pricing as Priced before confirming it.");
+      return;
+    }
     const err = mod.validate?.(full) || validateData({ ...data, [mod.slug]: rows.some(x => x.id === full.id) ? rows.map(x => x.id === full.id ? full : x) : [...rows, full] });
     if (err) { toast.error(err); return; }
     const isNew = !rows.some((x) => x.id === full.id);
@@ -226,7 +310,11 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
     const i = mod.statuses.indexOf(r.status);
     const next = mod.statuses[i + 1];
     if (!next) return;
-    const withReturns = mod.slug === "quality-check" && next === "Stage 2 done"
+    if (mod.slug === "supplier-prices" && next === "Priced" && parseLines(r["item"]).some((line) => num(line.r) <= 0)) {
+      toast.error("Enter a price greater than zero for every product before marking this submission as Priced.");
+      return;
+    }
+    const withReturns = mod.slug === "quality-check" && next === "Stage 2 done" && r["sourceType"] !== "Return"
       ? { ...r, item: JSON.stringify(parseLines(r["item"]).map((l) => ({ ...l, ret: returnsAvailable(data, l.p, r.id) }))) }
       : r;
     const full = normalize(mod.slug, { ...withReturns, status: next } as Row);
@@ -239,7 +327,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
   const blank = (): Row => {
     const today = new Date().toISOString().slice(0, 10);
     const r: Row = { id: nextId(mod.slug), status: mod.statuses[0] ?? "" };
-    mod.fields.forEach((f) => (r[f.key] = f.type === "products" || f.type === "buys" ? "[]" : f.type === "number" ? 0 : f.type === "date" ? today : (f.options?.[0] ?? (f.key === "responsible" ? "Ravi Kumar" : ""))));
+    mod.fields.forEach((f) => (r[f.key] = f.type === "products" || f.type === "buys" ? "[]" : f.type === "number" ? 0 : f.type === "date" ? today : (mod.slug === "supplier-prices" && (f.key === "supplier" || f.key === "dc") ? "" : (f.options?.[0] ?? (f.key === "responsible" ? "Ravi Kumar" : "")))));
     return r;
   };
 
@@ -458,7 +546,47 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                   <td className="px-4 py-3 font-mono text-xs font-semibold text-primary">{r.id}</td>
                   {cols.map((c) => (
                   <td key={c.key} className={cn("whitespace-nowrap px-4 py-3", c.type === "number" && "text-right tabular-nums")}>
-                    {c.key === "warehouse" ? (
+                    {mod.slug === "sales-orders" && c.key === "invoice" ? (
+                      invoiceForSalesOrder(r.id, data["dispatch"] ?? [], data["invoices"] ?? []) ? (
+                        <button
+                          type="button"
+                          className="font-medium text-primary underline-offset-2 hover:underline"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            const linkedInvoice = invoiceForSalesOrder(r.id, data["dispatch"] ?? [], data["invoices"] ?? []);
+                            if (linkedInvoice) {
+                              setInvoiceViewRow({
+                                ...linkedInvoice,
+                                so: linkedInvoice["so"] || r.id,
+                                buyer: linkedInvoice["buyer"] || r["buyer"] || "",
+                                item: linkedInvoice["item"] || r["item"] || "[]",
+                                rate: linkedInvoice["rate"] || r["rate"] || 0,
+                                taxable: linkedInvoice["taxable"] || r["value"] || 0,
+                                total: linkedInvoice["total"] || linkedInvoice["taxable"] || r["value"] || 0,
+                              });
+                            }
+                          }}
+                        >
+                          {String(r[c.key])}
+                        </button>
+                      ) : ["Dispatched", "Closed"].includes(r.status) ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-xs text-primary"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            const invoice = draftInvoiceForSalesOrder(r, nextId("invoices"), data["dispatch"] ?? []);
+                            upsert("invoices", invoice);
+                            toast.success(`${invoice.id} draft created for ${r.id}`);
+                          }}
+                        >
+                          Create draft
+                        </Button>
+                      ) : (
+                        <span className="text-muted-foreground">Available after dispatch</span>
+                      )
+                    ) : c.key === "warehouse" ? (
                       <span className="inline-flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400 border border-amber-500/20">
                         <Building2 className="size-3 text-amber-600 dark:text-amber-400" />
                         {String(r[c.key] || DEFAULT_WAREHOUSE)}
@@ -468,7 +596,16 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                         {totalPacketCount(r).toLocaleString("en-IN")} pkts
                       </span>
                     ) : c.type === "products" ? (
-                      <ProductChips v={r[c.key]} />
+                      mod.slug === "supplier-prices" ? (
+                        <span className="text-muted-foreground">{parseLines(r[c.key]).length} products</span>
+                      ) : (
+                        <ProductChips
+                          v={r[c.key]}
+                          salePricing={mod.slug === "sales-orders" || mod.slug === "invoices"}
+                          defaultRate={Number(r["rate"]) || 0}
+                          showPrices={canViewPrice(role)}
+                        />
+                      )
                     ) : (
                       fmt(c, r[c.key], role)
                     )}
@@ -476,9 +613,19 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                 ))}
                   <td className="px-4 py-3">
                     <StatusBadge status={r.status} statuses={mod.statuses} />
-                    {mod.slug === "sales-orders" && (
+                    {(mod.slug === "sales-orders" || mod.slug === "supplier-prices") && (
                       <div className="mt-1">
-                        {["Dispatched", "Closed"].includes(r.status) ? (
+                        {mod.slug === "supplier-prices" ? (
+                          parseLines(r["item"]).some((line) => (Number(line.sellingPrice) || 0) > 0) ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded">
+                              Selling price saved
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                              No selling price
+                            </span>
+                          )
+                        ) : ["Dispatched", "Closed"].includes(r.status) ? (
                           <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded">
                             <CheckCircle2 className="size-3" /> Stock Deducted (-{Number(r.qty || 0)} kg)
                           </span>
@@ -524,6 +671,17 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                       {mod.slug === "dispatch" && (
                         <Button variant="ghost" title="View Sales Delivery Challan (F19)" onClick={() => setChallanRow(r)} className="rounded-md p-1.5 text-primary hover:bg-primary-soft">
                           <FileText className="size-4" />
+                        </Button>
+                      )}
+                      {mod.slug === "invoices" && (
+                        <Button
+                          variant="ghost"
+                          title="View and print invoice"
+                          aria-label={`View invoice ${r.id}`}
+                          onClick={() => setInvoiceViewRow(r)}
+                          className="rounded-md p-1.5 text-primary hover:bg-primary-soft"
+                        >
+                          <Eye className="size-4" />
                         </Button>
                       )}
                       {mod.slug === "receipts" && (
@@ -572,6 +730,17 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                             </Button>
                           )}
                         </>
+                      )}
+                      {mod.slug === "supplier-prices" && (
+                        <Button
+                          variant="ghost"
+                          title="View Supplier Price Details"
+                          aria-label={`View supplier price details for ${r.id}`}
+                          onClick={() => setSupplierPricePopup(r)}
+                          className="rounded-md p-1.5 text-primary hover:bg-primary-soft"
+                        >
+                          <Eye className="size-4" />
+                        </Button>
                       )}
                       {r.status !== mod.statuses.at(-1) && (
                         <Button variant="ghost" title="Move to next step" onClick={() => advance(r)} className="rounded-md p-1.5 text-success hover:bg-success-soft"><ArrowRight className="size-4" /></Button>
@@ -637,6 +806,21 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
           onReturnContainer={() => setReturnContainerRow(view)}
           onReturnChallan={() => setReturnChallanRow(view)}
         />
+      )}
+      {supplierPricePopup && (
+        <SupplierPriceDetailsDialog
+          row={supplierPricePopup}
+          canEdit={canEditPrice(role)}
+          onClose={() => setSupplierPricePopup(null)}
+          onSave={(updated) => {
+            upsert("supplier-prices", normalize("supplier-prices", updated));
+            setSupplierPricePopup(null);
+            toast.success(`Selling prices saved for ${updated.id}`);
+          }}
+        />
+      )}
+      {invoiceViewRow && (
+        <InvoiceViewModal invoice={invoiceViewRow} onClose={() => setInvoiceViewRow(null)} />
       )}
 
       {challanRow && (
@@ -756,8 +940,17 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
 
 function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row: Row; onClose: () => void; onSave: (r: Row) => void; isNew: boolean }) {
   const { data, role } = useStore();
-  const priceEditable = canEditPrice(role as any);
+  const priceEditable = canEditPrice(role);
+  const salePriceEditable = priceEditable || ROLES[role]?.canManageSales === true;
   const [form, setForm] = useState<Row>(() => {
+    if (mod.slug === "sales-orders") {
+      const legacyRate = Number(row["rate"]) || 0;
+      const saleLines = parseLines(row["item"]).map((line) => ({
+        ...line,
+        saleRate: line.saleRate ?? legacyRate,
+      }));
+      return { ...row, item: JSON.stringify(saleLines) };
+    }
     // A new trip's template carries buys as an empty "[]" string, so check the parsed lines, not the raw value.
     if (mod.slug !== "trips" || (row["buys"] && parseBuys(row["buys"]).length > 0)) return row;
     // New trip: pre-fill one line for every demand product, with KG = buyer demand (same figure shown in the chips).
@@ -774,15 +967,14 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
   }, [data, mod.slug, row.id]);
   const signaturesMissing = mod.slug === "trips" && live.status === "Submitted" && num(live["signatures"]) < 3;
   const set = (k: string, v: string | number) => setForm((f) => {
-    if (mod.slug === "quality-check" && k === "status" && v === "Stage 2 done") {
+    if (mod.slug === "quality-check" && k === "status" && v === "Stage 2 done" && f["sourceType"] !== "Return") {
       const ls = parseLines(f["item"]).map((l) => ({ ...l, ret: returnsAvailable(data, l.p, f.id) }));
       return { ...f, status: "Stage 2 done", item: JSON.stringify(ls) };
     }
     if (mod.slug === "supplier-prices" && k === "rate") {
       const newRate = Number(v) || 0;
       const currentLines = parseLines(f["item"]);
-      const allZero = currentLines.every((l) => !l.r || l.r === 0);
-      if (allZero && currentLines.length > 0) {
+      if (currentLines.length > 0) {
         const updatedLines = currentLines.map((l) => ({ ...l, r: newRate }));
         const totQty = updatedLines.reduce((s, l) => s + l.q, 0);
         const totAmt = updatedLines.reduce((s, l) => s + l.q * newRate, 0);
@@ -791,7 +983,8 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
           rate: newRate,
           item: JSON.stringify(updatedLines),
           qty: totQty || f.qty,
-          amount: Math.round(totAmt),
+          amount: round(totAmt),
+          status: newRate > 0 ? "Priced" : "Awaiting price",
         };
       }
     }
@@ -805,12 +998,29 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
         qty: round(baseQty + extra),
       };
     }
+    if (mod.slug === "sales-orders" && k === "po") {
+      const populated = populate(mod.slug, k, String(v), f, data);
+      const existingLines = parseLines(f["item"]);
+      const saleLines = parseLines(populated["item"]).map((line) => {
+        const existing = existingLines.find((item) => item.p === line.p);
+        return {
+          ...line,
+          saleRate: num(existing?.saleRate) > 0 ? num(existing?.saleRate) : num(line.saleRate),
+        };
+      });
+      return {
+        ...populated,
+        item: JSON.stringify(saleLines),
+        qty: total(saleLines),
+      };
+    }
     if (k === "sourceType" || k === "direction") return { ...f, [k]: v, lot: "", ref: "", item: "[]" };
     return referenceModule(mod.slug, k, f) ? populate(mod.slug, k, String(v), f, data) : { ...f, [k]: v };
   });
   const input = "w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-ring/25 disabled:bg-muted disabled:text-muted-foreground";
 
   const hasWideEditor = mod.fields.some((f) => f.type === "products" || f.type === "buys");
+  const compactSalesOrder = mod.slug === "sales-orders";
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center p-4">
@@ -820,6 +1030,14 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
           e.preventDefault();
           if (signaturesMissing) {
             e.currentTarget.querySelector<HTMLSelectElement>('#field-signatures')?.focus();
+            return;
+          }
+          if (mod.slug === "supplier-prices" && ["Priced", "Confirmed"].includes(form.status) && parseLines(live["item"]).some((line) => num(line.r) <= 0)) {
+            toast.error("Enter a price greater than zero for every product before submitting the pricing status.");
+            return;
+          }
+          if (mod.slug === "invoices" && !live["so"] && !live["dc"]) {
+            toast.error("Select a sales order or sales DC to create this invoice.");
             return;
           }
           const missing = mod.fields.find((f) => f.required && !String(live[f.key] ?? "").trim());
@@ -838,12 +1056,13 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
           </div>
           <Button variant="ghost" type="button" onClick={onClose} aria-label="Close"><X className="size-5" /></Button>
         </div>
-        <div className="grid gap-4 p-5 sm:grid-cols-2">
+        <div className={cn("grid sm:grid-cols-2", compactSalesOrder ? "gap-3 p-4" : "gap-4 p-5")}>
           {mod.fields
             .filter(f => !(mod.slug === "purchase-orders" && (f.key === "extraKg" || f.key === "qty")))
             .filter(f => !(mod.slug === "trips" && (f.key === "supplier" || f.key === "rate")))
+            .filter(f => !(mod.slug === "sales-orders" && f.key === "rate"))
             .map((f) => (
-            <div key={f.key} className={cn("space-y-1.5", (f.type === "textarea" || f.type === "products" || f.type === "buys") && "sm:col-span-2")}>
+            <div key={f.key} className={cn(compactSalesOrder ? "space-y-1" : "space-y-1.5", (f.type === "textarea" || f.type === "products" || f.type === "buys") && "sm:col-span-2")}>
               <label htmlFor={`field-${f.key}`} className="text-xs font-semibold text-muted-foreground">
                 {f.label}{f.required && <span className="text-destructive"> *</span>}{f.suffix && ` (${f.suffix})`}{!priceEditable && (f.money || f.key === "rate" || f.key === "price") && " · Back office only"}
               </label>
@@ -857,24 +1076,51 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                 />
               ) : f.type === "buys" ? (
                 <BuysEditor need={need} products={f.options ?? []} suppliers={(data["suppliers"] ?? []).filter((x) => x.status !== "Inactive" && x.status !== "Rejected").map((x) => String(x["name"] ?? "")).filter(Boolean)} value={live[f.key]} onChange={(v) => set(f.key, v)} priceEditable={priceEditable} />
+              ) : f.type === "products" && f.readOnly ? (
+                <div className="rounded-lg border bg-muted/40 p-3">
+                  <ProductChips
+                    v={live[f.key]}
+                    all
+                    salePricing={mod.slug === "invoices"}
+                    defaultRate={Number(live["rate"]) || 0}
+                    showPrices={canViewPrice(role)}
+                  />
+                </div>
               ) : f.type === "products" ? (
                 <>
                   <ProductPicker
                     options={f.options ?? []}
                     value={live[f.key]}
+                    defaultSellingPrice={mod.slug === "sales-orders"
+                      ? (product) => supplierSellingPriceForProduct(product, data["trips"] ?? [], data["supplier-prices"] ?? []) || Number(form["rate"]) || 0
+                      : undefined}
                     onChange={(v) => {
-                      if (mod.slug === "supplier-prices") {
+                      if (mod.slug === "sales-orders") {
+                        const selected = parseLines(v).map((line) => ({
+                          ...line,
+                          saleRate: line.saleRate ?? (Number(form["rate"]) || 0),
+                        }));
+                        const qty = total(selected);
+                        setForm((prev) => ({
+                          ...prev,
+                          [f.key]: JSON.stringify(selected),
+                          qty,
+                        }));
+                      } else if (mod.slug === "supplier-prices") {
                         const ls = parseLines(v);
                         const totQty = ls.reduce((s, l) => s + (Number(l.q) || 0), 0);
                         const totAmt = ls.reduce((s, l) => s + (Number(l.q) || 0) * (Number(l.r) || 0), 0);
                         const hasLineRates = ls.some((l) => (Number(l.r) || 0) > 0);
-                        const avgRate = totQty > 0 ? (hasLineRates ? Math.round((totAmt / totQty) * 100) / 100 : Number(live["rate"]) || 0) : Number(live["rate"]) || 0;
+                        const avgRate = totQty > 0 ? (hasLineRates ? round(totAmt / totQty) : Number(live["rate"]) || 0) : Number(live["rate"]) || 0;
                         setForm((prev) => ({
                           ...prev,
                           [f.key]: v,
                           qty: totQty,
-                          amount: Math.round(hasLineRates ? totAmt : totQty * (Number(prev["rate"]) || 0)),
+                          amount: round(hasLineRates ? totAmt : totQty * (Number(prev["rate"]) || 0)),
                           rate: avgRate,
+                          status: ls.length > 0 && ls.every((line) => (Number(line.r) || 0) > 0)
+                            ? (prev.status === "Confirmed" ? "Confirmed" : "Priced")
+                            : "Awaiting price",
                         }));
                       } else if (mod.slug === "receipts") {
                         const ls = parseLines(v);
@@ -901,11 +1147,20 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                     }}
                     grading={mod.slug === "quality-check"}
                     stage2={live.status === "Stage 2 done"}
-                    returnsAvail={(p) => returnsAvailable(data, p, form.id)}
+                    returnsAvail={(p) => live["sourceType"] === "Return" ? 0 : returnsAvailable(data, p, form.id)}
                     pricing={mod.slug === "supplier-prices"}
+                    sellingPricing={mod.slug === "sales-orders"}
                     defaultRate={Number(live["rate"]) || 0}
-                    priceEditable={priceEditable}
+                    priceEditable={mod.slug === "sales-orders" ? salePriceEditable : priceEditable}
                   />
+                  {mod.slug === "sales-orders" && (
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/25 bg-emerald-500/5 px-3 py-2 text-xs">
+                      <span className="font-semibold text-foreground">Sale value from product prices:</span>
+                      <span className="rounded-lg bg-emerald-600 px-2.5 py-1 font-mono font-bold text-white">
+                        {fmtMoney(live["value"])}
+                      </span>
+                    </div>
+                  )}
                   {mod.slug === "purchase-orders" && (
                     <div className="mt-2.5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 text-xs shadow-2xs">
                       <div className="flex items-center gap-2">
@@ -923,8 +1178,28 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                     <option value="">Select {f.label}</option>
                     {(referenceModule(mod.slug, f.key, form) ? (data[referenceModule(mod.slug, f.key, form) ?? ""] ?? []).filter(r => {
                       if (mod.slug === "receipts") return r.status === "Submitted";
-                      if (mod.slug === "quality-check") return form["sourceType"] === "Return" ? ["Received", "Sent to QC"].includes(r.status) : r.status === "Posted";
-                      if (mod.slug === "returns") return ["Dispatched", "Closed"].includes(r.status);
+                      if (mod.slug === "quality-check") {
+                        if (form["sourceType"] !== "Return") return r.status === "Posted";
+                        if (!["Received", "Sent to QC"].includes(r.status)) return false;
+                        const returnChecks = (data["quality-check"] ?? []).filter((check) =>
+                          check["lot"] === r.id && check["sourceType"] === "Return" && check.id !== form.id
+                        );
+                        return parseLines(r["item"]).some((line) => {
+                          const inspected = returnChecks.reduce((sum, check) =>
+                            sum + (parseLines(check["item"]).find((checked) => checked.p === line.p)?.q || 0), 0
+                          );
+                          return line.q - inspected > 0.001;
+                        });
+                      }
+                      if (mod.slug === "returns") {
+                        const hasSalesDc = (data["dispatch"] ?? []).some((dispatch) => dispatch["so"] === r.id);
+                        return ["Dispatched", "Closed"].includes(r.status) || hasSalesDc;
+                      }
+                      if (mod.slug === "dispatch" && f.key === "so") return r.status === "Confirmed" || r.id === form["so"];
+                      if (mod.slug === "deliveries" && f.key === "dc") {
+                        const alreadyRecorded = (data["deliveries"] ?? []).some((delivery) => delivery["dc"] === r.id && delivery.id !== form.id);
+                        return !alreadyRecorded || r.id === form["dc"];
+                      }
                       if (mod.slug === "sales-orders" && f.key === "po") return r["buyer"] === form["buyer"] && r.status !== "Rejected";
                       return r.status !== "Rejected" && r.status !== "Inactive";
                     }).map(r => ({ value: ["buyer", "supplier", "transporter"].includes(f.key) ? String(r["name"]) : r.id, label: `${mod.slug === "receipts" && f.key === "dc" ? (data["transport"] ?? []).find((t) => t["ref"] === r.id)?.id ?? r.id : r.id} · ${r["name"] || r["buyer"] || r["supplier"] || r["lot"] || r.status}` })) : (f.options ?? []).map(o => ({ value:o, label:o }))).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -1101,10 +1376,10 @@ function DetailPanel({
             </div>
           )}
           <dl className="divide-y rounded-xl border">
-            {mod.fields.map((f) => (
+            {mod.fields.filter((f) => !(mod.slug === "supplier-prices" && f.key === "item")).map((f) => (
               <div key={f.key} className="flex justify-between gap-4 px-4 py-2.5 text-sm">
                 <dt className="text-muted-foreground">{f.label}</dt>
-                <dd className="text-right font-medium">{f.type === "products" ? <div className="flex flex-wrap justify-end gap-1"><ProductChips v={row[f.key]} all /></div> : fmt(f, row[f.key], role)}</dd>
+                <dd className="text-right font-medium">{f.type === "products" ? <div className="flex flex-wrap justify-end gap-1"><ProductChips v={row[f.key]} all salePricing={mod.slug === "sales-orders" || mod.slug === "invoices"} defaultRate={Number(row["rate"]) || 0} showPrices={canViewPrice(role)} /></div> : fmt(f, row[f.key], role)}</dd>
               </div>
             ))}
           </dl>
@@ -1180,7 +1455,19 @@ function DetailPanel({
   );
 }
 
-function ProductChips({ v, all }: { v: unknown; all?: boolean }) {
+function ProductChips({
+  v,
+  all,
+  salePricing = false,
+  defaultRate = 0,
+  showPrices = true,
+}: {
+  v: unknown;
+  all?: boolean;
+  salePricing?: boolean;
+  defaultRate?: number;
+  showPrices?: boolean;
+}) {
   const lines = parseLines(v);
   if (!lines.length) return <span className="text-muted-foreground">—</span>;
   const shown = all ? lines : lines.slice(0, 2);
@@ -1190,7 +1477,11 @@ function ProductChips({ v, all }: { v: unknown; all?: boolean }) {
         <span key={l.p} className="rounded-md bg-primary-soft px-2 py-0.5 text-xs font-medium text-primary">
           {l.p}
           {l.q ? ` · ${l.q} kg` : ""}
-          {l.r !== undefined && l.r > 0 ? ` @ ₹${l.r}` : ""}
+          {salePricing && showPrices && (l.saleRate ?? defaultRate) > 0
+            ? ` @ ${fmtMoney(l.saleRate ?? defaultRate)}/kg · ${fmtMoney(l.q * (l.saleRate ?? defaultRate))}`
+            : !salePricing && showPrices && l.r !== undefined && l.r > 0
+              ? ` @ ₹${l.r.toLocaleString("en-IN", { maximumFractionDigits: 2 })}/kg · ₹${(l.q * l.r).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`
+              : ""}
         </span>
       ))}
       {!all && lines.length > 2 && <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">+{lines.length - 2}</span>}
@@ -1206,6 +1497,8 @@ function ProductPicker({
   stage2,
   returnsAvail,
   pricing,
+  sellingPricing,
+  defaultSellingPrice,
   defaultRate = 0,
   priceEditable = true,
 }: {
@@ -1216,6 +1509,8 @@ function ProductPicker({
   stage2?: boolean;
   returnsAvail?: (p: string) => number;
   pricing?: boolean;
+  sellingPricing?: boolean;
+  defaultSellingPrice?: (product: string) => number;
   defaultRate?: number;
   priceEditable?: boolean;
 }) {
@@ -1235,12 +1530,22 @@ function ProductPicker({
     emit(
       lines.some((l) => l.p === p)
         ? lines.filter((l) => l.p !== p)
-        : [...lines, { p, q: defaultPackSizeKg, packKg: defaultPackSizeKg, packLabel: defaultPackLabel, ...(pricing ? { r: defaultRate || 0 } : {}) }]
+        : [...lines, {
+            p,
+            q: defaultPackSizeKg,
+            packKg: defaultPackSizeKg,
+            packLabel: defaultPackLabel,
+            ...(pricing ? { r: defaultRate || 0 } : {}),
+            ...(sellingPricing ? { saleRate: defaultSellingPrice?.(p) ?? 0 } : {}),
+          }]
     );
   };
   const totalQty = lines.reduce((a, l) => a + (Number(l.q) || 0), 0);
-  const totalAmount = pricing
-    ? lines.reduce((a, l) => a + (Number(l.q) || 0) * (Number(l.r) || 0), 0)
+  const totalAmount = pricing || sellingPricing
+    ? lines.reduce(
+        (a, l) => a + (Number(l.q) || 0) * (Number(sellingPricing ? l.saleRate ?? defaultRate : l.r) || 0),
+        0,
+      )
     : 0;
   const weightedAvgRate = totalQty > 0 ? Math.round((totalAmount / totalQty) * 100) / 100 : defaultRate;
 
@@ -1291,19 +1596,19 @@ function ProductPicker({
   }, [allOptions, catalog, selectedCategory, selectedPackSize, filterQuery]);
 
   return (
-    <div className="space-y-3 rounded-2xl border bg-muted/20 p-3.5">
-      {pricing && (
-        <div className="flex items-center justify-between rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3.5 py-2 text-xs text-emerald-800 dark:text-emerald-300">
+    <div className={cn("rounded-2xl border bg-muted/20", sellingPricing ? "space-y-2 p-2.5" : "space-y-3 p-3.5")}>
+      {(pricing || sellingPricing) && (
+        <div className={cn("flex items-center justify-between rounded-xl border border-emerald-500/20 bg-emerald-500/10 text-xs text-emerald-800 dark:text-emerald-300", sellingPricing ? "gap-2 px-3 py-1.5" : "px-3.5 py-2")}>
           <span className="font-semibold">💡 Individual Product Pricing</span>
-          <span>Set distinct ₹/KG rate for each product. Total amount and weighted average rate are calculated per product line.</span>
+          <span>{sellingPricing ? "Set the selling ₹/KG price for each product; the order total and average are calculated automatically." : "Set distinct ₹/KG rate for each product. Total amount and weighted average rate are calculated per product line."}</span>
         </div>
       )}
 
       {/* Side-by-Side Product Workspace Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-stretch">
+      <div className={cn("grid grid-cols-1 lg:grid-cols-12", sellingPricing ? "items-start gap-2.5" : "items-stretch gap-3.5")}>
         
         {/* LEFT PANE: All Products Sidebar / Catalog (5 columns) */}
-        <div className="lg:col-span-5 flex flex-col rounded-xl border border-border/80 bg-card p-3 shadow-xs h-[450px]">
+        <div className={cn("lg:col-span-5 flex flex-col rounded-xl border border-border/80 bg-card p-3 shadow-xs", sellingPricing ? "h-[340px]" : "h-[450px]")}>
           {/* Header */}
           <div className="flex items-center justify-between pb-2 border-b border-border/50">
             <div>
@@ -1444,7 +1749,7 @@ function ProductPicker({
         </div>
 
         {/* RIGHT PANE: Selected Products Table & Quantities (7 columns) */}
-        <div className="lg:col-span-7 flex flex-col rounded-xl border border-border/80 bg-card p-3 shadow-xs h-[450px]">
+        <div className={cn("lg:col-span-7 flex flex-col rounded-xl border border-border/80 bg-card p-3 shadow-xs", sellingPricing ? "min-h-[190px] max-h-[340px] self-start" : "h-[450px]")}>
           {/* Header */}
           <div className="flex items-center justify-between pb-2 border-b border-border/50">
             <div className="flex items-center gap-2">
@@ -1457,6 +1762,7 @@ function ProductPicker({
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold text-foreground tabular-nums">
                   {Math.round(totalPackets * 10) / 10} {countUnit} · {totalQty.toLocaleString("en-IN")} kg
+                  {(pricing || sellingPricing) && ` · ${fmtMoney(totalAmount)}`}
                 </span>
                 <button
                   type="button"
@@ -1471,7 +1777,7 @@ function ProductPicker({
 
           {/* Table or Empty State */}
           {lines.length > 0 ? (
-            <div className="flex-1 overflow-y-auto overflow-x-auto rounded-lg border border-border/60 bg-background/50 mt-2 scrollbar-thin">
+            <div className={cn("overflow-y-auto overflow-x-auto rounded-lg border border-border/60 bg-background/50 mt-2 scrollbar-thin", sellingPricing ? "max-h-[270px]" : "flex-1")}>
               <table className="w-full text-sm">
                 <thead className="sticky top-0 z-10 bg-muted/80 backdrop-blur-xs text-left text-[11px] uppercase tracking-wide text-muted-foreground">
                   <tr>
@@ -1479,9 +1785,9 @@ function ProductPicker({
                     <th className="px-2.5 py-2 min-w-[200px]">Product & Pack Spec</th>
                     <th className="px-2.5 py-2 text-right">Packets / Count</th>
                     <th className="px-2.5 py-2 text-right">{grading ? "Input KG" : "Total KG"}</th>
-                    {pricing && (
+                    {(pricing || sellingPricing) && (
                       <>
-                        <th className="px-2.5 py-2 text-right">Rate · ₹/KG</th>
+                        <th className="px-2.5 py-2 text-right">{sellingPricing ? "Sale price · ₹/KG" : "Rate · ₹/KG"}</th>
                         <th className="px-2.5 py-2 text-right">Amount · ₹</th>
                       </>
                     )}
@@ -1504,7 +1810,8 @@ function ProductPicker({
                 </thead>
                 <tbody className="divide-y divide-border/40">
                   {lines.map((l, i) => {
-                    const lineAmt = (Number(l.q) || 0) * (Number(l.r) || 0);
+                    const lineRate = sellingPricing ? Number(l.saleRate ?? defaultRate) || 0 : Number(l.r) || 0;
+                    const lineAmt = (Number(l.q) || 0) * lineRate;
                     const spec = PRODUCT_CATALOG.find((item) => item.name === l.p);
                     const packKg = l.packKg ?? (spec?.packSizeKg && spec.packSizeKg > 0 ? spec.packSizeKg : 1.0);
                     const packLabel = l.packLabel ?? (spec?.defaultPackSize ?? (packKg < 1 ? `${Math.round(packKg * 1000)} g` : `${packKg} kg`));
@@ -1605,23 +1912,25 @@ function ProductPicker({
                           </div>
                         </td>
 
-                        {pricing && (
+                        {(pricing || sellingPricing) && (
                           <>
                             <td className="px-2.5 py-2 text-right">
                               <div className="inline-flex items-center justify-end gap-1">
                                 <span className="text-xs text-muted-foreground">₹</span>
                                 <input
-                                  aria-label={`${l.p} rate per KG`}
+                                  aria-label={`${l.p} ${sellingPricing ? "sale price" : "rate"} per KG`}
                                   min="0"
                                   type="number"
                                   step="any"
                                   disabled={!priceEditable}
                                   title={!priceEditable ? "Rate is entered by back office only" : undefined}
-                                  value={l.r !== undefined && l.r !== null ? l.r : ""}
+                                  value={sellingPricing ? l.saleRate ?? defaultRate : l.r ?? ""}
                                   placeholder="0"
                                   onChange={(e) => {
                                     const val = e.target.value === "" ? 0 : Number(e.target.value);
-                                    emit(lines.map((x) => (x.p === l.p ? { ...x, r: val } : x)));
+                                    emit(lines.map((x) => (x.p === l.p
+                                      ? sellingPricing ? { ...x, saleRate: val } : { ...x, r: val }
+                                      : x)));
                                   }}
                                   className="w-20 rounded-lg border bg-background px-2 py-1 text-right text-xs font-semibold text-emerald-600 dark:text-emerald-400 outline-none focus:border-primary disabled:bg-muted disabled:text-muted-foreground"
                                 />
@@ -1727,7 +2036,7 @@ function ProductPicker({
               </table>
             </div>
           ) : (
-            <div className="flex flex-col items-center justify-center flex-1 text-center p-6 border border-dashed rounded-xl border-border/70 bg-muted/15 mt-2">
+            <div className={cn("flex flex-col items-center justify-center text-center border border-dashed rounded-xl border-border/70 bg-muted/15 mt-2", sellingPricing ? "min-h-[110px] p-3" : "flex-1 p-6")}>
               <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/10 text-primary mb-2.5">
                 <Package className="size-6 stroke-[1.8]" />
               </div>
@@ -1772,6 +2081,108 @@ function ProductPicker({
   );
 }
 
+function SupplierPriceDetailsDialog({
+  row,
+  canEdit,
+  onClose,
+  onSave,
+}: {
+  row: Row;
+  canEdit: boolean;
+  onClose: () => void;
+  onSave: (row: Row) => void;
+}) {
+  const [lines, setLines] = useState(() => parseLines(row["item"]));
+  const purchaseTotal = lines.reduce((sum, line) => sum + line.q * num(line.r ?? row["rate"]), 0);
+  const sellingTotal = lines.reduce((sum, line) => sum + line.q * num(line.sellingPrice), 0);
+  const inputClass = "w-32 rounded-md border bg-background px-2.5 py-1.5 text-right text-sm tabular-nums outline-none focus:border-primary focus:ring-2 focus:ring-ring/25 disabled:bg-muted";
+
+  return (
+    <div className="fixed inset-0 z-[60] grid place-items-center p-4">
+      <button type="button" aria-label="Close selling price details" className="absolute inset-0 bg-foreground/40 backdrop-blur-sm" onClick={onClose} />
+      <form
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="supplier-price-details-title"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave({ ...row, item: JSON.stringify(lines) });
+        }}
+        className="relative max-h-[88vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-card shadow-card"
+      >
+        <div className="flex items-start justify-between border-b bg-hero p-5 text-primary-foreground">
+          <div>
+            <p className="font-mono text-xs opacity-80">{row.id} · {String(row["dc"] || "No trip DC")}</p>
+            <h2 id="supplier-price-details-title" className="mt-1 text-lg font-semibold">Product price details</h2>
+            <p className="text-sm opacity-80">{String(row["supplier"] || "Supplier")}</p>
+          </div>
+          <Button type="button" variant="ghost" onClick={onClose} aria-label="Close"><X className="size-5" /></Button>
+        </div>
+        <div className="space-y-4 p-5">
+          <div className="overflow-x-auto rounded-lg border">
+            <table className="w-full min-w-[650px] text-sm">
+              <thead className="bg-muted/60 text-xs uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2.5 text-left">Product</th>
+                  <th className="px-3 py-2.5 text-right">Quantity (kg)</th>
+                  <th className="px-3 py-2.5 text-right">Purchase price / kg</th>
+                  <th className="px-3 py-2.5 text-right">Purchase amount</th>
+                  <th className="px-3 py-2.5 text-right">Selling price / kg</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {lines.map((line, index) => (
+                  <tr key={line.p}>
+                    <td className="px-3 py-2.5 font-medium">{line.p}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">{line.q.toLocaleString("en-IN")}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">₹{num(line.r ?? row["rate"]).toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
+                    <td className="px-3 py-2.5 text-right tabular-nums">₹{(line.q * num(line.r ?? row["rate"])).toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
+                    <td className="px-3 py-2.5 text-right">
+                      <input
+                        aria-label={`${line.p} selling price per kg`}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={line.sellingPrice ?? ""}
+                        disabled={!canEdit}
+                        placeholder="Enter price"
+                        className={inputClass}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setLines((current) => current.map((item, itemIndex) => itemIndex === index
+                            ? { ...item, sellingPrice: value === "" ? undefined : Math.max(0, Number(value) || 0) }
+                            : item));
+                        }}
+                      />
+                    </td>
+                  </tr>
+                ))}
+                {!lines.length && (
+                  <tr><td colSpan={5} className="px-3 py-8 text-center text-muted-foreground">No products were saved for this trip.</td></tr>
+                )}
+              </tbody>
+              <tfoot className="border-t bg-muted/40 text-sm font-semibold">
+                <tr>
+                  <td className="px-3 py-2.5">{lines.length} products</td>
+                  <td className="px-3 py-2.5 text-right tabular-nums">{num(row["qty"]).toLocaleString("en-IN")} kg</td>
+                  <td className="px-3 py-2.5" />
+                  <td className="px-3 py-2.5 text-right tabular-nums">₹{purchaseTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
+                  <td className="px-3 py-2.5 text-right tabular-nums">₹{sellingTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })} total</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          {!canEdit && <p className="text-xs text-muted-foreground">You can view prices but do not have permission to change selling prices.</p>}
+        </div>
+        <div className="flex justify-end gap-2 border-t bg-muted/40 p-4">
+          <Button type="button" variant="ghost" onClick={onClose} className="rounded-lg border px-4 py-2">Close</Button>
+          {canEdit && <Button type="submit" className="rounded-lg bg-primary px-4 py-2 font-semibold text-primary-foreground">Save Selling Prices</Button>}
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function SupplierPricesSummary({ row }: { row: Row }) {
   const ls = parseLines(row["item"]);
   if (!ls.length) return null;
@@ -1805,9 +2216,9 @@ function SupplierPricesSummary({ row }: { row: Row }) {
                     )}
                   </td>
                   <td className="px-2.5 py-1.5 text-right tabular-nums">{l.q}</td>
-                  <td className="px-2.5 py-1.5 text-right tabular-nums">₹{r}</td>
+                  <td className="px-2.5 py-1.5 text-right tabular-nums">₹{r.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
                   <td className="px-2.5 py-1.5 text-right font-mono tabular-nums font-semibold">
-                    ₹{Math.round(amt).toLocaleString("en-IN")}
+                    ₹{amt.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
                   </td>
                 </tr>
               );
@@ -1819,7 +2230,7 @@ function SupplierPricesSummary({ row }: { row: Row }) {
               <td className="px-2.5 py-1.5 text-right tabular-nums">{num(row["qty"])} kg</td>
               <td className="px-2.5 py-1.5 text-right tabular-nums text-muted-foreground">Avg ₹{num(row["rate"])}</td>
               <td className="px-2.5 py-1.5 text-right font-mono text-primary tabular-nums">
-                ₹{Math.round(num(row["amount"])).toLocaleString("en-IN")}
+                ₹{num(row["amount"]).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
               </td>
             </tr>
           </tfoot>

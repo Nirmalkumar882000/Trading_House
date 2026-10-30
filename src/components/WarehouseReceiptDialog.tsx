@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { Link } from "@tanstack/react-router";
 import {
   X,
   Check,
@@ -84,6 +85,25 @@ interface GRNLine {
   reason: string;
 }
 
+const returnReceiptLines = (record: Row): GRNLine[] =>
+  lines(record).map((line) => {
+    const spec = PRODUCT_CATALOG.find(
+      (product) => product.name.toLowerCase() === line.p.toLowerCase()
+    );
+    const def = getDefaultContainer(line.p, line.q);
+    return {
+      p: line.p,
+      sentQ: line.q,
+      q: line.q,
+      containerType: String(line.containerType || def.type),
+      containerCount: num(line.containerCount) || def.count,
+      packKg: spec?.packSizeKg || 0.5,
+      packLabel: spec?.defaultPackSize || "500 g",
+      category: spec?.category || "Produce",
+      reason: "—",
+    };
+  });
+
 const DIFFERENCE_REASONS = [
   "—",
   "Moisture loss",
@@ -104,6 +124,7 @@ interface WarehouseReceiptDialogProps {
   onClose: () => void;
   onSave: (r: Row) => void;
   isNew: boolean;
+  initialFlow?: "Purchase" | "BuyerReturn";
 }
 
 export function WarehouseReceiptDialog({
@@ -111,8 +132,50 @@ export function WarehouseReceiptDialog({
   onClose,
   onSave,
   isNew,
+  initialFlow = "Purchase",
 }: WarehouseReceiptDialogProps) {
-  const { data } = useStore();
+  const { data, upsert } = useStore();
+  const returnRecords = useMemo(
+    () => (data["returns"] ?? []).filter((record) =>
+      ["Requested", "Return DC created", "Received", "Sent to QC"].includes(record.status) &&
+      parseLines(record["item"]).length > 0
+    ),
+    [data],
+  );
+  const returnReadyForReceipt = (record: Row) => record.status === "Return DC created";
+  const [flowType, setFlowType] = useState<"Purchase" | "BuyerReturn">(initialFlow);
+  const [returnId, setReturnId] = useState<string>(() =>
+    initialFlow === "BuyerReturn"
+      ? String(
+          returnRecords.find((record) => record.id === row.id)?.id ||
+          returnRecords.find(returnReadyForReceipt)?.id ||
+          returnRecords.at(-1)?.id ||
+          ""
+        )
+      : ""
+  );
+  const selectedReturn = useMemo(
+    () => returnRecords.find((record) => record.id === returnId),
+    [returnRecords, returnId],
+  );
+  const canReceiveReturn = !!selectedReturn && returnReadyForReceipt(selectedReturn);
+  const returnQualityChecks = useMemo(
+    () => selectedReturn
+      ? (data["quality-check"] ?? []).filter((check) =>
+          check["sourceType"] === "Return" && check["lot"] === selectedReturn.id
+        )
+      : [],
+    [data, selectedReturn],
+  );
+  const returnQcInProgress = returnQualityChecks.some((check) => check.status === "Stage 1 done");
+  const returnQcComplete = !!selectedReturn && returnQualityChecks.length > 0 &&
+    returnQualityChecks.every((check) => check.status === "Stage 2 done") &&
+    lines(selectedReturn).every((line) => {
+      const inspected = returnQualityChecks.reduce((sum, check) =>
+        sum + (lines(check, "input").find((item) => item.p === line.p)?.q || 0), 0
+      );
+      return inspected >= line.q - 0.001;
+    });
 
   // Trips eligible for warehouse receipt (Submitted or Inward Transit)
   const trips = useMemo(() => {
@@ -124,10 +187,10 @@ export function WarehouseReceiptDialog({
   // Consignment & Header States
   const [dc, setDc] = useState<string>(String(row["dc"] || trips[0]?.id || ""));
   const [date, setDate] = useState<string>(
-    String(row["date"] || new Date().toISOString().slice(0, 10))
+    String((initialFlow === "BuyerReturn" ? selectedReturn?.["date"] : row["date"]) || new Date().toISOString().slice(0, 10))
   );
   const [warehouse, setWarehouse] = useState<string>(
-    String(row["warehouse"] || DEFAULT_WAREHOUSE)
+    String((initialFlow === "BuyerReturn" ? selectedReturn?.["warehouse"] : row["warehouse"]) || DEFAULT_WAREHOUSE)
   );
   const [responsible, setResponsible] = useState<string>(
     String(row["responsible"] || "Ravi Kumar")
@@ -164,6 +227,9 @@ export function WarehouseReceiptDialog({
 
   // Initial Produce Lines initialization
   const [linesState, setLinesState] = useState<GRNLine[]>(() => {
+    if (initialFlow === "BuyerReturn" && selectedReturn) {
+      return returnReceiptLines(selectedReturn);
+    }
     const rawParsed = parseLines(row["item"]);
     if (rawParsed.length > 0) {
       return rawParsed.map((l) => {
@@ -271,6 +337,32 @@ export function WarehouseReceiptDialog({
       });
       setLinesState(mapped);
       toast.success(`Loaded ${mapped.length} products from ${trip.id}`);
+    }
+  };
+
+  const handleSelectReturn = (newReturnId: string) => {
+    setReturnId(newReturnId);
+    const record = returnRecords.find((entry) => entry.id === newReturnId);
+    if (!record) {
+      setLinesState([]);
+      return;
+    }
+
+    setDate(String(record["date"] || new Date().toISOString().slice(0, 10)));
+    setWarehouse(String(record["warehouse"] || DEFAULT_WAREHOUSE));
+    setStatus(record.status);
+    setLinesState(returnReceiptLines(record));
+  };
+
+  const handleFlowChange = (nextFlow: "Purchase" | "BuyerReturn") => {
+    setFlowType(nextFlow);
+    if (nextFlow === "BuyerReturn") {
+      handleSelectReturn(
+        returnId || String(returnRecords.find(returnReadyForReceipt)?.id || returnRecords.at(-1)?.id || "")
+      );
+    } else {
+      setReturnId("");
+      if (dc) handleSelectTrip(dc);
     }
   };
 
@@ -451,6 +543,61 @@ export function WarehouseReceiptDialog({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
+    if (flowType === "BuyerReturn") {
+      if (!selectedReturn || !canReceiveReturn) {
+        toast.error(selectedReturn
+          ? `This return is already at “${selectedReturn.status}” and cannot be received again.`
+          : "Select a buyer return DC ready for warehouse receipt.");
+        return;
+      }
+      if (!warehouse) {
+        toast.error("Receiving Warehouse is required");
+        return;
+      }
+      if (!linesState.length || linesState.some((line) => line.q <= 0)) {
+        toast.error("Enter a received quantity above zero for each returned product.");
+        return;
+      }
+      const lineWithMissingReason = linesState.find(
+        (line) => round(line.q - line.sentQ) !== 0 && (!line.reason || line.reason === "—")
+      );
+      if (lineWithMissingReason) {
+        toast.error(`Please select a Difference Reason for ${lineWithMissingReason.p}`);
+        return;
+      }
+
+      const receivedReturn = normalize("returns", {
+        ...selectedReturn,
+        date,
+        status: "Received",
+        warehouse,
+        responsible,
+        item: JSON.stringify(linesState.map((line) => ({
+          p: line.p,
+          q: line.q,
+          sentQ: line.sentQ,
+          containerType: line.containerType,
+          containerCount: line.containerCount,
+          reason: line.reason,
+        }))),
+      });
+      const error = validateData({
+        ...data,
+        returns: (data["returns"] || []).map((record) =>
+          record.id === receivedReturn.id ? receivedReturn : record
+        ),
+      });
+      if (error) {
+        toast.error(error);
+        return;
+      }
+
+      upsert("returns", receivedReturn);
+      toast.success(`${receivedReturn.id} received into warehouse quarantine and is ready for QC.`);
+      onClose();
+      return;
+    }
+
     if (!dc) {
       toast.error("Please select a Purchase Reference (Trip DC)");
       return;
@@ -544,7 +691,9 @@ export function WarehouseReceiptDialog({
       <form
         role="dialog"
         aria-modal="true"
-        aria-label={`${isNew ? "New" : "Edit"} Warehouse receipts`}
+        aria-label={flowType === "BuyerReturn"
+          ? `${canReceiveReturn ? "Receive" : "View"} buyer return quarantine details`
+          : `${isNew ? "New" : "Edit"} Warehouse receipts`}
         onSubmit={handleSubmit}
         className="relative my-auto w-full max-w-4xl max-h-[92vh] flex flex-col rounded-2xl bg-card shadow-2xl border animate-in zoom-in-95 overflow-hidden"
       >
@@ -558,14 +707,18 @@ export function WarehouseReceiptDialog({
               <div className="flex items-center gap-2">
                 <span className="font-mono text-xs opacity-85">F06 · F07 · F08</span>
                 <span className="rounded bg-white/20 px-2 py-0.5 font-mono text-xs font-bold">
-                  {row.id}
+                  {flowType === "BuyerReturn" ? selectedReturn?.id || "Select Return DC" : row.id}
                 </span>
                 <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">
-                  {status}
+                  {flowType === "BuyerReturn" ? selectedReturn?.status || "Select Return" : status}
                 </span>
               </div>
               <h2 className="text-base sm:text-lg font-bold">
-                {isNew ? "New" : "Edit"} — Warehouse Receipt Note (GRN)
+                {flowType === "BuyerReturn"
+                  ? isNew
+                    ? "Receive Buyer Return into Quarantine"
+                    : "Buyer Return & Quarantine Details"
+                  : `${isNew ? "New" : "Edit"} — Warehouse Receipt Note (GRN)`}
               </h2>
             </div>
           </div>
@@ -581,37 +734,88 @@ export function WarehouseReceiptDialog({
 
         {/* Modal Scrollable Body */}
         <div className="overflow-y-auto p-4 sm:p-5 space-y-4 text-xs">
+          {isNew && (
+            <div className="grid grid-cols-2 gap-2 rounded-xl border bg-muted/30 p-1.5" role="group" aria-label="Warehouse receipt flow">
+              <button
+                type="button"
+                aria-pressed={flowType === "Purchase"}
+                onClick={() => handleFlowChange("Purchase")}
+                className={cn(
+                  "rounded-lg px-3 py-2.5 text-left transition-colors",
+                  flowType === "Purchase" ? "bg-card text-foreground shadow-xs ring-1 ring-border" : "text-muted-foreground hover:bg-card/70"
+                )}
+              >
+                <span className="block font-semibold">Inward · Purchase GRN</span>
+                <span className="mt-0.5 block text-[10px]">Receive supplier goods into ungraded stock</span>
+              </button>
+              <button
+                type="button"
+                aria-pressed={flowType === "BuyerReturn"}
+                onClick={() => handleFlowChange("BuyerReturn")}
+                className={cn(
+                  "rounded-lg px-3 py-2.5 text-left transition-colors",
+                  flowType === "BuyerReturn" ? "bg-blue-500/10 text-blue-800 ring-1 ring-blue-500/20 dark:text-blue-200" : "text-muted-foreground hover:bg-card/70"
+                )}
+              >
+                <span className="block font-semibold">Outward Return · Buyer Intake</span>
+                <span className="mt-0.5 block text-[10px]">Receive returned sales goods into quarantine for QC</span>
+              </button>
+            </div>
+          )}
+
           {/* SECTION 1: CONSIGNMENT & TRIP DETAILS BOX */}
           <div className="rounded-xl border bg-muted/30 p-3.5 space-y-3 shadow-xs">
             <div className="flex items-center justify-between border-b pb-2">
               <div className="flex items-center gap-2 text-foreground font-semibold">
                 <Truck className="size-4 text-primary" />
-                <span>1. Inward Consignment & Warehouse Destination</span>
+                <span>{flowType === "BuyerReturn" ? "1. Buyer Return & Quarantine Destination" : "1. Inward Consignment & Warehouse Destination"}</span>
               </div>
               <span className="text-[11px] text-muted-foreground font-mono">
-                Origin DC: <strong className="text-foreground">{tripDcNo}</strong>
+                {flowType === "BuyerReturn" ? "Sales DC: " : "Origin DC: "}
+                <strong className="text-foreground">
+                  {flowType === "BuyerReturn" ? String(selectedReturn?.["salesDc"] || "—") : tripDcNo}
+                </strong>
               </span>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-3">
-              {/* Purchase Reference DC Select */}
-              <div className="space-y-1">
-                <label className="text-[11px] font-semibold text-muted-foreground">
-                  Purchase Reference (Trip DC) <span className="text-destructive">*</span>
-                </label>
-                <select
-                  value={dc}
-                  onChange={(e) => handleSelectTrip(e.target.value)}
-                  className="w-full h-9 rounded-lg border bg-background px-2.5 text-xs font-medium focus:ring-2 focus:ring-primary/20 outline-none"
-                >
-                  <option value="">Select incoming trip</option>
-                  {trips.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.id} · {t["supplier"] || "Market"} · {num(t["net"])} kg
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {flowType === "BuyerReturn" ? (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-muted-foreground">
+                    Buyer Return DC <span className="text-destructive">*</span>
+                  </label>
+                  <select
+                    value={returnId}
+                    onChange={(e) => handleSelectReturn(e.target.value)}
+                    className="w-full h-9 rounded-lg border bg-background px-2.5 text-xs font-medium focus:ring-2 focus:ring-primary/20 outline-none"
+                  >
+                    <option value="">Select a buyer return</option>
+                    {returnRecords.map((record) => (
+                      <option key={record.id} value={record.id}>
+                        {record.id} · {record["buyer"] || "Buyer"} · {num(record["qty"]) || total(lines(record))} kg · {record.status}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-muted-foreground">
+                    Purchase Reference (Trip DC) <span className="text-destructive">*</span>
+                  </label>
+                  <select
+                    value={dc}
+                    onChange={(e) => handleSelectTrip(e.target.value)}
+                    className="w-full h-9 rounded-lg border bg-background px-2.5 text-xs font-medium focus:ring-2 focus:ring-primary/20 outline-none"
+                  >
+                    <option value="">Select incoming trip</option>
+                    {trips.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.id} · {t["supplier"] || "Market"} · {num(t["net"])} kg
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Receiving Warehouse Facility */}
               <div className="space-y-1">
@@ -646,25 +850,29 @@ export function WarehouseReceiptDialog({
               </div>
             </div>
 
-            {/* Inward Supplier & Origin DC Strip (Transport details removed) */}
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-card border px-3 py-2 text-[11px] text-muted-foreground">
-              <div className="flex items-center gap-1.5">
-                <span className="font-semibold text-foreground">Supplier (Ledger):</span>
-                <span className="rounded bg-primary/10 px-2 py-0.5 font-bold text-primary">
-                  {supplier}
-                </span>
+            {flowType === "BuyerReturn" ? (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-[11px]">
+                <span><strong className="text-foreground">Buyer:</strong> <span className="font-semibold text-blue-800 dark:text-blue-200">{selectedReturn?.["buyer"] || "Select a return"}</span></span>
+                <span><strong className="text-foreground">Original Sale:</strong> <span className="font-mono">{selectedReturn?.["sale"] || "—"}</span></span>
+                <span><strong className="text-foreground">Return reason:</strong> <span className="font-medium">{selectedReturn?.["reason"] || "—"}</span></span>
+                <span><strong className="text-foreground">Received by:</strong> <span className="font-medium">{responsible}</span></span>
               </div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-semibold text-foreground">Purchase Delivery Challan:</span>
-                <span className="font-mono font-medium text-foreground bg-muted px-1.5 py-0.5 rounded">
-                  {tripDcNo}
-                </span>
+            ) : (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-card border px-3 py-2 text-[11px] text-muted-foreground">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-semibold text-foreground">Supplier (Ledger):</span>
+                  <span className="rounded bg-primary/10 px-2 py-0.5 font-bold text-primary">{supplier}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-semibold text-foreground">Purchase Delivery Challan:</span>
+                  <span className="font-mono font-medium text-foreground bg-muted px-1.5 py-0.5 rounded">{tripDcNo}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-semibold text-foreground">Receiving Manager:</span>
+                  <span className="font-medium text-foreground">{responsible}</span>
+                </div>
               </div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-semibold text-foreground">Receiving Manager:</span>
-                <span className="font-medium text-foreground">{responsible}</span>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* SECTION 2: CONSIGNMENT PRODUCTS & CONTAINER ALLOCATIONS */}
@@ -673,7 +881,7 @@ export function WarehouseReceiptDialog({
               <div className="flex items-center gap-2">
                 <Package className="size-4 text-primary" />
                 <span className="font-semibold text-foreground text-xs">
-                  2. Consignment Products & Container Allocations ({linesState.length} Items)
+                  {flowType === "BuyerReturn" ? "2. Returned Products & Container Check-in" : "2. Consignment Products & Container Allocations"} ({linesState.length} Items)
                 </span>
                 <span className="rounded-full bg-primary/10 px-2.5 py-0.5 font-mono text-xs font-bold text-primary">
                   {totalReceivedKg.toFixed(2)} kg Net Weighed
@@ -683,8 +891,8 @@ export function WarehouseReceiptDialog({
                 </span>
               </div>
 
-              {/* Quick Add Produce dropdown */}
-              <div className="flex items-center gap-1.5">
+                {/* Quick Add Produce dropdown */}
+                {flowType === "Purchase" && <div className="flex items-center gap-1.5">
                 <select
                   value={productToAdd}
                   onChange={(e) => handleAddProduct(e.target.value)}
@@ -699,7 +907,7 @@ export function WarehouseReceiptDialog({
                     </option>
                   ))}
                 </select>
-              </div>
+              </div>}
             </div>
 
             {/* Produce Table with Product-Based Container Boxes */}
@@ -709,11 +917,11 @@ export function WarehouseReceiptDialog({
                   <tr>
                     <th className="py-2 px-3 w-8">#</th>
                     <th className="py-2 px-3">Product Name</th>
-                    <th className="py-2 px-3 text-right">Sent KG (Supplier)</th>
-                    <th className="py-2 px-3 text-right w-32">Received KG (Bay Net)</th>
+                    <th className="py-2 px-3 text-right">{flowType === "BuyerReturn" ? "Return DC KG" : "Sent KG (Supplier)"}</th>
+                    <th className="py-2 px-3 text-right w-32">{flowType === "BuyerReturn" ? "Received KG (Quarantine)" : "Received KG (Bay Net)"}</th>
                     <th className="py-2 px-3 text-center w-56">Containers (Type & Box Count)</th>
                     <th className="py-2 px-3 text-right">Difference</th>
-                    <th className="py-2 px-3 text-center min-w-40">Difference Reason</th>
+                    <th className="py-2 px-3 text-center min-w-40">{flowType === "BuyerReturn" ? "Weight Difference Reason" : "Difference Reason"}</th>
                     <th className="py-2 px-3 w-10 text-center"></th>
                   </tr>
                 </thead>
@@ -747,6 +955,7 @@ export function WarehouseReceiptDialog({
                             min="0"
                             value={l.q}
                             onChange={(e) => handleLineQtyChange(idx, Number(e.target.value))}
+                            disabled={flowType === "BuyerReturn" && !canReceiveReturn}
                             className="w-24 h-7 text-right rounded border bg-background px-1.5 font-mono font-bold text-foreground focus:ring-1 focus:ring-primary outline-none"
                           />
                         </td>
@@ -759,6 +968,7 @@ export function WarehouseReceiptDialog({
                               onChange={(e) =>
                                 handleLineContainerCountChange(idx, Number(e.target.value))
                               }
+                              disabled={flowType === "BuyerReturn" && !canReceiveReturn}
                               className="w-14 h-7 text-right rounded border bg-background px-1 font-mono font-bold text-foreground focus:ring-1 focus:ring-primary outline-none"
                               title="Container Box Count"
                             />
@@ -767,6 +977,7 @@ export function WarehouseReceiptDialog({
                               onChange={(e) =>
                                 handleLineContainerTypeChange(idx, e.target.value)
                               }
+                              disabled={flowType === "BuyerReturn" && !canReceiveReturn}
                               className="h-7 text-[11px] rounded border bg-background px-1.5 font-medium text-foreground focus:ring-1 focus:ring-primary outline-none"
                               title="Container Type"
                             >
@@ -802,7 +1013,7 @@ export function WarehouseReceiptDialog({
                             aria-label={`${l.p} difference reason`}
                             value={l.reason}
                             onChange={(e) => handleLineReasonChange(idx, e.target.value)}
-                            disabled={lineDiff === 0}
+                            disabled={lineDiff === 0 || (flowType === "BuyerReturn" && !canReceiveReturn)}
                             className="h-7 w-full min-w-36 rounded border bg-background px-1.5 text-[11px] font-medium text-foreground focus:ring-1 focus:ring-primary outline-none"
                           >
                             {DIFFERENCE_REASONS.map((option) => (
@@ -813,14 +1024,14 @@ export function WarehouseReceiptDialog({
                           </select>
                         </td>
                         <td className="py-2 px-3 text-center">
-                          <button
+                          {flowType === "Purchase" && <button
                             type="button"
                             onClick={() => handleRemoveLine(idx)}
                             className="text-muted-foreground hover:text-destructive p-1 rounded transition-colors"
                             title="Remove produce"
                           >
                             <Trash2 className="size-3.5" />
-                          </button>
+                          </button>}
                         </td>
                       </tr>
                     );
@@ -863,6 +1074,8 @@ export function WarehouseReceiptDialog({
             </div>
           </div>
 
+          {flowType === "Purchase" ? (
+            <>
           {/* SECTION 3: WEIGHT RECONCILIATION & 10% WASTAGE TOLERANCE BOX */}
           <div className="rounded-xl border border-primary/20 bg-gradient-to-r from-primary/5 via-card to-background p-3.5 space-y-3 shadow-xs">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
@@ -1102,21 +1315,101 @@ export function WarehouseReceiptDialog({
               </span>
             </div>
           </div>
+            </>
+          ) : (
+            <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4">
+              <div className="flex items-start gap-3">
+                <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-amber-500/15 text-amber-700 dark:text-amber-300">
+                  <AlertTriangle className="size-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="font-semibold text-foreground">Buyer return quarantine check-in</h3>
+                  <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                    The received quantity is recorded against this Return DC and placed in Quarantine. It does not become saleable stock until Return QC grades it.
+                  </p>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                    <div className="rounded-lg border bg-card p-2.5">
+                      <p className="text-[10px] font-medium text-muted-foreground">Return DC received</p>
+                      <p className="mt-0.5 font-mono text-sm font-bold text-foreground">{totalReceivedKg.toFixed(2)} kg</p>
+                    </div>
+                    <div className="rounded-lg border bg-card p-2.5">
+                      <p className="text-[10px] font-medium text-muted-foreground">Warehouse location</p>
+                      <p className="mt-0.5 text-xs font-semibold text-foreground">{warehouse}</p>
+                    </div>
+                    <div className="rounded-lg border bg-card p-2.5">
+                      <p className="text-[10px] font-medium text-muted-foreground">Next step</p>
+                      <p className="mt-0.5 text-xs font-semibold text-amber-700 dark:text-amber-300">
+                        {selectedReturn?.status === "Sent to QC"
+                          ? "Return QC in progress"
+                          : selectedReturn?.status === "Received"
+                            ? "Send to Return QC"
+                            : selectedReturn?.status === "Requested"
+                              ? "Create Return DC"
+                              : selectedReturn
+                                ? "Ready for warehouse check-in"
+                                : "Select a return DC"}
+                      </p>
+                    </div>
+                  </div>
+                  {selectedReturn && !canReceiveReturn && (
+                    <p className="mt-3 rounded-lg bg-card px-3 py-2 text-[11px] font-medium text-muted-foreground">
+                      {selectedReturn.status === "Sent to QC"
+                        ? "This return is already in quarantine and sent to quality inspection. It is shown for tracking and cannot be received again."
+                        : selectedReturn.status === "Received"
+                          ? "This return is already in warehouse quarantine. Send it to Return QC; do not receive it again."
+                          : "This return is still awaiting its Return DC and pickup. It cannot be received into quarantine yet."}
+                    </p>
+                  )}
+                  {selectedReturn && ["Received", "Sent to QC"].includes(selectedReturn.status) && (
+                    <Button asChild type="button" size="sm" variant="outline" className="mt-3 h-8 text-xs">
+                      <Link
+                        to="/m/$module"
+                        params={{ module: returnQcComplete ? "packing" : "quality-check" }}
+                        onClick={onClose}
+                      >
+                        {returnQcComplete
+                          ? "Continue to Allocation & Packing"
+                          : returnQcInProgress
+                            ? "Continue Return QC"
+                            : "Start Return QC"}
+                      </Link>
+                    </Button>
+                  )}
+                  {!selectedReturn && (
+                    <p className="mt-3 rounded-lg bg-card px-3 py-2 text-[11px] font-medium text-muted-foreground">
+                      No buyer return records are available. Create a return against a dispatched sale to see its pickup and quarantine status here.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Modal Footer */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-muted/40 px-5 py-3 shrink-0">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          {flowType === "Purchase" ? <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span>Status:</span>
             <select
               value={status}
               onChange={(e) => setStatus(e.target.value)}
               className="h-7 rounded border bg-background px-2 text-xs font-semibold focus:ring-1 focus:ring-primary outline-none"
             >
-              <option value="Posted">Posted (Receive into Bay)</option>
               <option value="Arrived">Arrived (Pre-check)</option>
+              <option value="Weighed">Weighed (Bay weight captured)</option>
+              <option value="Validated">Validated (Ready to post)</option>
+              <option value="Posted">Posted (Receive into Bay)</option>
             </select>
-          </div>
+          </div> : (
+            <div className="flex items-center gap-2 text-xs font-medium text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="size-3.5" />
+              {canReceiveReturn
+                ? "Receiving marks this return as Received in quarantine"
+                : selectedReturn
+                  ? `Read-only return details · ${selectedReturn.status}`
+                  : "No return selected"}
+            </div>
+          )}
 
           <div className="flex items-center gap-2">
             <Button
@@ -1131,10 +1424,15 @@ export function WarehouseReceiptDialog({
             <Button
               type="submit"
               size="sm"
+              disabled={flowType === "BuyerReturn" && !canReceiveReturn}
               className="h-9 px-5 text-xs font-semibold gap-1.5 shadow-sm"
             >
               <Check className="size-4" />
-              Save & Post GRN ({totalReceivedKg.toFixed(2)} kg)
+              {flowType === "BuyerReturn"
+                ? canReceiveReturn
+                  ? `Receive into Quarantine (${totalReceivedKg.toFixed(2)} kg)`
+                  : `View return details (${totalReceivedKg.toFixed(2)} kg)`
+                : `${status === "Posted" ? "Save & Post" : "Save"} GRN (${totalReceivedKg.toFixed(2)} kg)`}
             </Button>
           </div>
         </div>

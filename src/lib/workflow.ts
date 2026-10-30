@@ -1,7 +1,7 @@
 import type { Row } from './modules';
 import { WAREHOUSES, DEFAULT_WAREHOUSE } from './modules';
 export type Data = Record<string, Row[]>;
-export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; packKg?: number; packLabel?: string; containerType?: string; containerCount?: number; extraKg?: number; reason?: string; sentQ?: number; grader?: string; lineTag?: string; startTime?: string; box?: number };
+export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; saleRate?: number; sellingPrice?: number; packKg?: number; packLabel?: string; containerType?: string; containerCount?: number; extraKg?: number; reason?: string; sentQ?: number; grader?: string; lineTag?: string; startTime?: string; box?: number };
 export const num = (v: unknown) => Number(v) || 0;
 export const round = (v: number) => Math.round(v * 1000) / 1000;
 export function parseLines(v: unknown): ProductLine[] {
@@ -14,6 +14,8 @@ export function parseLines(v: unknown): ProductLine[] {
         p: String(l.p),
         q: num(l.q),
         ...(l.r !== undefined ? { r: num(l.r) } : {}),
+        ...(l.saleRate !== undefined ? { saleRate: num(l.saleRate) } : {}),
+        ...(l.sellingPrice !== undefined ? { sellingPrice: num(l.sellingPrice) } : {}),
         ...(l.packKg !== undefined ? { packKg: num(l.packKg) } : {}),
         ...(l.packLabel !== undefined ? { packLabel: String(l.packLabel) } : {}),
         ...(l.containerType !== undefined ? { containerType: String(l.containerType) } : {}),
@@ -71,6 +73,117 @@ export const total = (ls: ProductLine[]) => round(ls.reduce((s,l) => s + l.q, 0)
 export const locations = { Ungraded: 'Receiving bay', 'Grade A': 'A · Fresh room', Remaining: 'QC holding bay', 'Grade B': 'B · Secondary room', Rejected: 'Reject isolation', Quarantine: 'Returns inspection bay', Allocated: 'Allocation bay', Packed: 'Dispatch bay' };
 export type Category = keyof typeof locations;
 export type Movement = { id: string; ref: string; purchase: string; product: string; source: string; destination: string; qty: number; date: string; person: string; warehouse: string };
+export type WarehouseFlowRow = {
+  id: string;
+  flowType?: 'Dispatch' | 'Buyer return pickup' | 'Buyer return quarantine';
+  reference: string;
+  sourceReference: string;
+  product: string;
+  party: string;
+  qty: number;
+  status: string;
+  date: string;
+  warehouse: string;
+  reason?: string;
+  products?: ProductLine[];
+  deliveryLocation?: string;
+  transporter?: string;
+  vehicle?: string;
+  driver?: string;
+};
+export function warehouseFlowRows(data: Data, direction: 'Inward' | 'Outward', warehouse = 'All'): WarehouseFlowRow[] {
+  if (direction === 'Inward') {
+    const trips = data['trips'] || [];
+    return [
+      ...(data['receipts'] || []).flatMap(receipt => {
+        const trip = trips.find(entry => entry.id === receipt['dc']);
+        const location = String(receipt['warehouse'] || trip?.['warehouse'] || DEFAULT_WAREHOUSE);
+        if (warehouse !== 'All' && location !== warehouse) return [];
+        return lines(receipt, 'received').map(line => ({
+          id: `${receipt.id}-${line.p}`,
+          reference: receipt.id,
+          sourceReference: String(trip?.['dc'] || receipt['dc'] || '—'),
+          product: line.p,
+          party: String(receipt['supplier'] || trip?.['supplier'] || 'Market supplier'),
+          qty: line.q,
+          status: String(receipt.status || '—'),
+          date: String(receipt['date'] || ''),
+          warehouse: location,
+        }));
+      }),
+      ...(data['returns'] || [])
+        .filter(record => ['Received', 'Sent to QC'].includes(record.status))
+        .flatMap(record => {
+          const location = String(record['warehouse'] || DEFAULT_WAREHOUSE);
+          if (warehouse !== 'All' && location !== warehouse) return [];
+          return lines(record).map(line => ({
+            id: `${record.id}-${line.p}`,
+            flowType: 'Buyer return quarantine' as const,
+            reference: record.id,
+            sourceReference: String(record['salesDc'] || record['sale'] || '—'),
+            product: line.p,
+            party: String(record['buyer'] || 'Buyer return'),
+            qty: line.q,
+            status: record.status,
+            date: String(record['date'] || ''),
+            warehouse: location,
+            reason: String(record['reason'] || ''),
+          }));
+        }),
+    ].sort((a, b) => b.date.localeCompare(a.date) || a.reference.localeCompare(b.reference));
+  }
+
+  const salesOrders = data['sales-orders'] || [];
+  const dispatchRows = (data['dispatch'] || []).flatMap(dispatch => {
+    const sale = salesOrders.find(entry => entry.id === dispatch['so']);
+    if (!sale || !['Confirmed', 'Dispatched', 'Closed'].includes(sale.status)) return [];
+    const location = String(dispatch['warehouse'] || sale['warehouse'] || DEFAULT_WAREHOUSE);
+    if (warehouse !== 'All' && location !== warehouse) return [];
+    const dispatchLines = lines(dispatch);
+    const saleLines = dispatchLines.length > 0 ? dispatchLines : lines(sale);
+    return saleLines.map(line => ({
+      id: `${dispatch.id}-${line.p}`,
+      flowType: 'Dispatch' as const,
+      reference: dispatch.id,
+      sourceReference: sale.id,
+      product: line.p,
+      party: String(dispatch['buyer'] || sale['buyer'] || 'Buyer'),
+      qty: line.q,
+      status: String(dispatch.status || sale.status),
+      date: String(dispatch['date'] || sale['date'] || ''),
+      warehouse: location,
+      products: saleLines,
+      deliveryLocation: String(dispatch['toLocation'] || buyerLocation(
+        String(dispatch['buyer'] || sale['buyer'] || ''),
+        data['buyers'] || [],
+      )),
+      transporter: String(dispatch['transporter'] || ''),
+      vehicle: String(dispatch['vehicle'] || ''),
+      driver: String(dispatch['driver'] || ''),
+    }));
+  });
+  const returnPickupRows = (data['returns'] || [])
+    .filter(record => ['Requested', 'Return DC created'].includes(record.status))
+    .flatMap(record => {
+      const location = String(record['warehouse'] || DEFAULT_WAREHOUSE);
+      if (warehouse !== 'All' && location !== warehouse) return [];
+      return lines(record).map(line => ({
+        id: `${record.id}-pickup-${line.p}`,
+        flowType: 'Buyer return pickup' as const,
+        reference: record.id,
+        sourceReference: String(record['salesDc'] || record['sale'] || '—'),
+        product: line.p,
+        party: String(record['buyer'] || 'Buyer'),
+        qty: line.q,
+        status: record.status,
+        date: String(record['date'] || ''),
+        warehouse: location,
+        reason: String(record['reason'] || ''),
+      }));
+    });
+  return [...dispatchRows, ...returnPickupRows]
+    .sort((a, b) => b.date.localeCompare(a.date) || a.reference.localeCompare(b.reference));
+}
 export function movements(data: Data): Movement[] {
   const out: Movement[] = [];
   const move = (r: Row, l: ProductLine, source: string, destination: string, q: number, purchase = '', wh = '') => {
@@ -91,14 +204,29 @@ export function movements(data: Data): Movement[] {
     }
   };
   for (const r of data['receipts'] || []) if (r.status === 'Posted') for (const l of lines(r,'received')) move(r,l,'Market', 'Ungraded', l.q, String(r['dc']), String(r['warehouse'] || DEFAULT_WAREHOUSE));
-  for (const r of data['returns'] || []) if (['Received','Sent to QC'].includes(r.status)) for (const l of lines(r)) move(r,l,'Buyer', 'Remaining',l.q,String(r['sale']), String(r['warehouse'] || DEFAULT_WAREHOUSE));
+  for (const r of data['returns'] || []) if (['Received','Sent to QC'].includes(r.status)) for (const l of lines(r)) move(r,l,'Buyer', 'Quarantine',l.q,String(r['sale']), String(r['warehouse'] || DEFAULT_WAREHOUSE));
   for (const r of data['quality-check'] || []) {
     if (r.status === 'Assigned') continue;
-    const qcWh = String(r['warehouse'] || (data['receipts'] || []).find(x => x.id === r['lot'])?.['warehouse'] || DEFAULT_WAREHOUSE);
+    const isReturn = r['sourceType'] === 'Return';
+    const qcWh = String(r['warehouse'] || (data[isReturn ? 'returns' : 'receipts'] || []).find(x => x.id === r['lot'])?.['warehouse'] || DEFAULT_WAREHOUSE);
     for (const l of lines(r,'input')) {
-      const a = num(l.a); const rem = round(l.q - a); const source = 'Ungraded';
+      const a = num(l.a); const rem = round(l.q - a); const source = isReturn ? 'Quarantine' : 'Ungraded';
       move(r,l,source,'Grade A',a,String(r['lot']), qcWh); move(r,l,source,'Remaining',rem,String(r['lot']), qcWh);
-      if (r.status === 'Stage 2 done') { move(r,l,'Remaining','Grade A',num(l.a2),String(r['lot']), qcWh); move(r,l,'Remaining','Grade B',num(l.b),String(r['lot']), qcWh); move(r,l,'Remaining','Rejected',round(rem+num(l.ret)-num(l.a2)-num(l.b)),String(r['lot']), qcWh); }
+      if (r.status === 'Stage 2 done') {
+        let remainingAvailable = rem;
+        let returnedAvailable = isReturn ? 0 : num(l.ret);
+        const moveStage2Output = (destination: string, quantity: number) => {
+          const fromRemaining = Math.min(remainingAvailable, quantity);
+          move(r,l,'Remaining',destination,fromRemaining,String(r['lot']),qcWh);
+          remainingAvailable = round(remainingAvailable - fromRemaining);
+          const fromQuarantine = Math.min(returnedAvailable, round(quantity - fromRemaining));
+          move(r,l,'Quarantine',destination,fromQuarantine,String(r['lot']),qcWh);
+          returnedAvailable = round(returnedAvailable - fromQuarantine);
+        };
+        moveStage2Output('Grade A',num(l.a2));
+        moveStage2Output('Grade B',num(l.b));
+        moveStage2Output('Rejected',round(rem+num(l.ret)-num(l.a2)-num(l.b)));
+      }
     }
   }
   for (const r of data['packing'] || []) {
@@ -139,7 +267,10 @@ export function packsText(packs: PackLine[], ls: ProductLine[]) {
 }
 export function returnsAvailable(data: Data, product: string, excludeId = ''): number {
   const returned = (data['returns'] || []).filter(x=>['Received','Sent to QC'].includes(x.status)).reduce((s,x)=>s+(lines(x).find(l=>l.p===product)?.q || 0),0);
-  const used = (data['quality-check'] || []).filter(x=>x.id!==excludeId && x.status==='Stage 2 done').reduce((s,x)=>s+num(lines(x,'input').find(l=>l.p===product)?.ret),0);
+  const qualityChecks = (data['quality-check'] || []).filter(x=>x.id!==excludeId);
+  const usedInPurchaseQc = qualityChecks.filter(x=>x['sourceType']!=='Return' && x.status==='Stage 2 done').reduce((s,x)=>s+num(lines(x,'input').find(l=>l.p===product)?.ret),0);
+  const assignedToReturnQc = qualityChecks.filter(x=>x['sourceType']==='Return').reduce((s,x)=>s+num(lines(x,'input').find(l=>l.p===product)?.q),0);
+  const used = usedInPurchaseQc + assignedToReturnQc;
   return Math.max(0, round(returned - used));
 }
 export const bagBreakdown = (qty: number, size: number) => ({ full: size > 0 ? Math.floor(qty / size) : 0, partial: size > 0 ? round(qty % size) : qty, opened: size > 0 && round(qty % size) > 0 ? 1 : 0 });
@@ -152,6 +283,111 @@ export function buysFromTrip(r: Row): Buy[] {
   if (r['buys']) return parseBuys(r['buys']);
   return lines(r, 'net').map(l => ({ s: String(r['supplier'] || ''), p: l.p, q: l.q, r: num(r['rate']) }));
 }
+export function supplierPricesFromTrips(trips: Row[], savedPrices: Row[]): Row[] {
+  const generated: Row[] = [];
+  const linkedTripIds = new Set<string>();
+
+  for (const trip of trips) {
+    const rawBuys = trip['buys'] ? parseBuys(trip['buys']) : [];
+    const buys = rawBuys.length
+      ? rawBuys
+      : lines(trip, 'net').map(line => ({
+        s: String(trip['supplier'] || ''),
+        p: line.p,
+        q: line.q,
+        r: line.r ?? num(trip['rate']),
+      }));
+    const bySupplier = new Map<string, Buy[]>();
+    for (const buy of buys) {
+      if (!buy.s || !buy.p || buy.q <= 0) continue;
+      const supplierBuys = bySupplier.get(buy.s) || [];
+      supplierBuys.push(buy);
+      bySupplier.set(buy.s, supplierBuys);
+    }
+
+    for (const [supplierIndex, [supplier, supplierBuys]] of [...bySupplier.entries()].entries()) {
+      linkedTripIds.add(trip.id);
+      const previous = savedPrices.find(price => price['dc'] === trip.id && price['supplier'] === supplier);
+      const previousLines = parseLines(previous?.['item']);
+      const itemLines = supplierBuys.map(buy => ({
+        p: buy.p,
+        q: buy.q,
+        r: rawBuys.length ? buy.r : previousLines.find(line => line.p === buy.p)?.r ?? buy.r,
+        ...(previousLines.find(line => line.p === buy.p)?.sellingPrice !== undefined
+          ? { sellingPrice: previousLines.find(line => line.p === buy.p)?.sellingPrice }
+          : {}),
+      }));
+      const qty = total(itemLines);
+      const amount = round(itemLines.reduce((sum, line) => sum + line.q * num(line.r), 0));
+      const fullyPriced = itemLines.every(line => num(line.r) > 0);
+      const confirmedPriceChanged = previous?.status === 'Confirmed' && (
+        previousLines.length !== itemLines.length ||
+        itemLines.some(line => {
+          const previousLine = previousLines.find(existing => existing.p === line.p);
+          return !previousLine || num(previousLine.r ?? previous['rate']) !== num(line.r);
+        })
+      );
+      const status = fullyPriced
+        ? previous?.status === 'Confirmed' && !confirmedPriceChanged ? 'Confirmed' : 'Priced'
+        : 'Awaiting price';
+
+      generated.push(normalize('supplier-prices', {
+        ...previous,
+        id: previous?.id || `PRC-${trip.id.replace(/[^a-zA-Z0-9]/g, '')}-${supplierIndex + 1}`,
+        dc: trip.id,
+        date: trip['date'] || previous?.['date'] || '',
+        supplier,
+        item: JSON.stringify(itemLines),
+        qty,
+        rate: qty > 0 ? round(amount / qty) : 0,
+        amount,
+        status,
+      }));
+    }
+  }
+
+  return [...generated, ...savedPrices.filter(price => !linkedTripIds.has(String(price['dc'] || '')))];
+}
+export function supplierSellingPriceForProduct(product: string, trips: Row[], savedPrices: Row[]): number {
+  const matchingPrices = supplierPricesFromTrips(trips, savedPrices)
+    .map(price => ({
+      date: String(price['date'] || ''),
+      id: String(price.id || ''),
+      line: parseLines(price['item']).find(item => item.p.toLowerCase() === product.toLowerCase() && num(item.sellingPrice) > 0),
+    }))
+    .filter((entry): entry is { date: string; id: string; line: ProductLine } => Boolean(entry.line))
+    .sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+  return num(matchingPrices[0]?.line?.sellingPrice);
+}
+export function invoiceForSalesOrder(salesOrderId: string, dispatches: Row[], invoices: Row[]): Row | undefined {
+  return invoices.find(invoice => {
+    if (invoice['so'] === salesOrderId || invoice['salesOrder'] === salesOrderId) return true;
+    const dispatch = dispatches.find(entry => entry.id === invoice['dc']);
+    return dispatch?.['so'] === salesOrderId;
+  });
+}
+export function draftInvoiceForSalesOrder(sale: Row, invoiceId: string, dispatches: Row[], date = new Date().toISOString().slice(0, 10)): Row {
+  const taxable = num(sale['value']);
+  const dispatch = dispatches.find(entry => entry['so'] === sale.id);
+  return {
+    id: invoiceId,
+    so: sale.id,
+    dc: dispatch?.id || '',
+    date,
+    buyer: String(sale['buyer'] || ''),
+    item: sale['item'] || '[]',
+    rate: num(sale['rate']),
+    taxable,
+    gst: '0',
+    total: taxable,
+    paid: 0,
+    status: 'Draft',
+  };
+}
+export function buyerLocation(buyerName: string, buyers: Row[]): string {
+  const buyer = buyers.find(entry => String(entry['name'] || '').toLowerCase() === buyerName.toLowerCase());
+  return String(buyer?.['location'] || buyer?.['address'] || buyer?.['city'] || '');
+}
 export function normalize(slug: string, r: Row): Row {
   if (slug === 'trips' && r['buys']) {
     const buys = parseBuys(r['buys']); const merged = new Map<string, number>();
@@ -162,7 +398,7 @@ export function normalize(slug: string, r: Row): Row {
     const containerTotals = containerLines.length ? { containerCount: containerLines.reduce((s,b)=>s+(b.cc||0),0), containerType: [...new Set(containerLines.map(b=>b.ct).filter(Boolean))].join(', ') } : {};
     r = { ...r, item: JSON.stringify([...merged].map(([p,q]) => ({ p, q }))), supplier: [...new Set(buys.map(b=>b.s).filter(Boolean))].join(', '), rate: qty ? round(amount/qty) : 0, amount, ...containerTotals };
   }
-  const ls = lines(r, slug === 'receipts' ? 'received' : slug === 'quality-check' ? 'input' : 'qty'); let qty = total(ls);
+  const ls = lines(r, slug === 'receipts' ? 'received' : slug === 'quality-check' ? 'input' : 'qty'); const qty = total(ls);
   const full = { ...r };
   if (ls.length) { full['item'] = JSON.stringify(ls); full['qty'] = qty; }
   if (slug === 'purchase-orders') {
@@ -173,14 +409,22 @@ export function normalize(slug: string, r: Row): Row {
   }
   if (slug === 'trips') { full['net'] = qty; full['amount'] = r['buys'] ? num(r['amount']) : round(qty*num(r['rate'])); }
   if (slug === 'supplier-prices') {
-    const hasLineRates = ls.some(l => num(l.r) > 0);
-    if (hasLineRates) {
-      const lineAmt = ls.reduce((s, l) => s + (l.q * num(l.r)), 0);
+    const hasLineRates = ls.some(l => l.r !== undefined);
+    const pricedLines = ls.map(l => ({
+      ...l,
+      r: l.r === undefined && !hasLineRates ? num(r['rate']) : num(l.r),
+    }));
+    if (pricedLines.some(l => l.r !== undefined)) {
+      const lineAmt = pricedLines.reduce((s, l) => s + (l.q * num(l.r)), 0);
+      full['item'] = JSON.stringify(pricedLines);
       full['amount'] = round(lineAmt);
       if (qty > 0) full['rate'] = round(lineAmt / qty);
     } else {
       full['amount'] = round(qty * num(r['rate']));
     }
+    const allLinesPriced = pricedLines.length > 0 && pricedLines.every(l => num(l.r) > 0);
+    if (allLinesPriced && r.status === 'Awaiting price') full['status'] = 'Priced';
+    if (!allLinesPriced && ['Priced', 'Confirmed'].includes(r.status)) full['status'] = 'Awaiting price';
   }
   if (slug === 'receipts') {
     if (!full['warehouse']) {
@@ -210,7 +454,16 @@ export function normalize(slug: string, r: Row): Row {
     full['input'] = qty; full['gradeA'] = round(ls.reduce((s,l)=>s+num(l.a)+(r.status === 'Stage 2 done' ? num(l.a2) : 0),0)); full['reject'] = round(ls.reduce((s,l)=>s+l.q-num(l.a)+(r.status === 'Stage 2 done' ? num(l.ret) : 0),0)); full['gradeB'] = r.status === 'Stage 2 done' ? round(ls.reduce((s,l)=>s+num(l.b),0)) : 0; full['trash'] = r.status === 'Stage 2 done' ? round(ls.reduce((s,l)=>s+num(l.ret),0)+qty-num(full['gradeA'])-num(full['gradeB'])) : 0;
   }
   if (slug === 'packing') { full['nominal'] = qty; full['packs'] = ls.reduce((s,l)=>s+Math.ceil(l.q / Math.max(0.001,num(r['packSize']))),0); }
-  if (slug === 'sales-orders') full['value'] = round(qty*num(r['rate']));
+  if (slug === 'sales-orders') {
+    const hasLineSellingRates = ls.some(l => l.saleRate !== undefined);
+    if (hasLineSellingRates) {
+      const lineValue = ls.reduce((sum, line) => sum + line.q * num(line.saleRate), 0);
+      full['value'] = round(lineValue);
+      full['rate'] = qty > 0 ? round(lineValue / qty) : 0;
+    } else {
+      full['value'] = round(qty*num(r['rate']));
+    }
+  }
   if (slug === 'containers') {
     const out = num(r['out']) || num(r['received']);
     const back = num(r['back']) || num(r['returned']);
@@ -346,8 +599,8 @@ export const references: Record<string, Record<string,string>> = {
   trips: { supplier:'suppliers', transporter:'transporters' }, 'purchase-orders':{buyer:'buyers'}, receipts:{dc:'trips'},
   containers: { party:'suppliers', receipt:'receipts' },
   'quality-check':{lot:'receipts'}, packing:{po:'purchase-orders'}, 'sales-orders':{buyer:'buyers',po:'purchase-orders'},
-  returns:{sale:'sales-orders'}, dispatch:{so:'sales-orders',transporter:'transporters'}, deliveries:{dc:'dispatch'}, invoices:{dc:'dispatch'},
-  'supplier-prices':{dc:'trips'}, transport:{transporter:'transporters',ref:'trips'},
+  returns:{sale:'sales-orders'}, dispatch:{so:'sales-orders',transporter:'transporters'}, deliveries:{dc:'dispatch'}, invoices:{dc:'dispatch',so:'sales-orders'},
+  'supplier-prices':{dc:'trips',supplier:'suppliers'}, transport:{transporter:'transporters',ref:'trips'},
 };
 export function referenceModule(slug: string, key: string, r: Row) {
   if (slug === 'transport' && key === 'ref') {
@@ -355,14 +608,47 @@ export function referenceModule(slug: string, key: string, r: Row) {
     if (r['direction'] === 'Outward Return') return 'returns';
     return 'trips';
   }
+  if (slug === 'quality-check' && key === 'lot' && r['sourceType'] === 'Return') return 'returns';
   return references[slug]?.[key];
 }
 export function populate(slug: string, key: string, value: string, form: Row, data: Data): Row {
   const target = referenceModule(slug,key,form); const ref = (data[target || ''] || []).find(r=>r.id===value || r['name']===value);
   let r: Row = { ...form,[key]:value }; if (!ref) return r;
   if (key === 'transporter') return { ...r, vehicle:ref['vehicle'] || '',driver:ref['driver'] || '',driverPhone:ref['phone'] || '' };
+  if (slug === 'supplier-prices' && (key === 'dc' || key === 'supplier')) {
+    const trip = key === 'dc' ? ref : (data['trips'] || []).find(t => t.id === form['dc']);
+    if (!trip) return r;
+    const selectedSupplier = key === 'supplier' ? String(value) : String(form['supplier'] || '');
+    const tripBuys = trip['buys'] ? parseBuys(trip['buys']) : [];
+    const matchingBuys = selectedSupplier
+      ? tripBuys.filter(b => b.s === selectedSupplier)
+      : tripBuys;
+    const sourceLines = tripBuys.length > 0
+      ? matchingBuys.map(b => ({ p: b.p, q: b.q, r: b.r }))
+      : (!selectedSupplier || selectedSupplier === trip['supplier'])
+        ? lines(trip, 'net').map(line => ({ ...line, r: num(trip['rate']) }))
+        : [];
+    const previousLines = parseLines(form['item']);
+    const itemLines = sourceLines.map(line => {
+      const previous = previousLines.find(existing => existing.p === line.p);
+      return { ...line, r: previous?.r ?? line.r ?? 0 };
+    });
+    const selectedSuppliers = [...new Set(matchingBuys.map(b => b.s).filter(Boolean))];
+    return normalize('supplier-prices', {
+      ...r,
+      dc: trip.id,
+      supplier: selectedSupplier || (selectedSuppliers.length === 1 ? selectedSuppliers[0] : (tripBuys.length ? '' : String(trip['supplier'] || ''))),
+      date: trip['date'] || form['date'] || '',
+      warehouse: trip['warehouse'] || form['warehouse'] || '',
+      item: JSON.stringify(itemLines),
+      qty: total(itemLines),
+      rate: num(trip['rate']),
+      amount: itemLines.reduce((sum, line) => sum + line.q * num(line.r), 0),
+      status: itemLines.length > 0 && itemLines.every(line => num(line.r) > 0) ? 'Priced' : 'Awaiting price',
+    });
+  }
   if (key === 'supplier') return r;
-  if (key === 'buyer') return slug === 'sales-orders' ? { ...r, po:'', item:'[]', qty:0, bags:'' } : r;
+  if (key === 'buyer') return slug === 'sales-orders' ? { ...r, po:'', item:'[]', qty:0, bags:'', rate:0, value:0 } : r;
   if (slug === 'receipts') {
     const tripBuys = ref['buys'] ? parseBuys(ref['buys']) : [];
     const sup = ref['supplier'] || (tripBuys.length > 0 ? [...new Set(tripBuys.map(b => b.s).filter(Boolean))].join(', ') : '');
@@ -392,7 +678,7 @@ export function populate(slug: string, key: string, value: string, form: Row, da
     };
   }
   if (slug === 'quality-check') {
-    const used = (data['quality-check'] || []).filter(x=>x.id!==form.id && x['lot']===value);
+    const used = (data['quality-check'] || []).filter(x=>x.id!==form.id && x['lot']===value && x['sourceType']===form['sourceType']);
     const ls = lines(ref, target==='receipts'?'received':'qty').map(l=>({p:l.p,q:Math.max(0,round(l.q-used.reduce((s,x)=>s+(lines(x,'input').filter(i=>i.p===l.p).reduce((acc, i) => acc + i.q, 0)),0))),a:0,a2:0,b:0,ret:0})).filter(l=>l.q>0);
     r = {
       ...r,
@@ -404,7 +690,18 @@ export function populate(slug: string, key: string, value: string, form: Row, da
     const sold = (data['sales-orders'] || []).filter(x=>x.id!==form.id && x['po']===value);
     const others = { ...data, 'sales-orders': (data['sales-orders'] || []).filter(x=>x.id!==form.id) };
     const packed = stock(others).filter(x=>x.category==='Packed');
-    const ls = lines(ref).map(l=>{ const open = round(l.q - sold.reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0)); const avail = packed.find(x=>x.product===l.p)?.qty || 0; return { p:l.p, q:Math.max(0,Math.min(open,avail)) }; }).filter(l=>l.q>0);
+    const savedPrices = data['supplier-prices'] || [];
+    const trips = data['trips'] || [];
+    const existingLines = lines(form);
+    const ls = lines(ref).map(l=>{
+      const open = round(l.q - sold.reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0));
+      const avail = packed.find(x=>x.product.toLowerCase()===l.p.toLowerCase())?.qty || 0;
+      const existing = existingLines.find(item => item.p === l.p);
+      const saleRate = num(existing?.saleRate) > 0
+        ? num(existing?.saleRate)
+        : supplierSellingPriceForProduct(l.p, trips, savedPrices);
+      return { ...l, p:l.p, q:Math.max(0,Math.min(open,avail)), saleRate };
+    });
     const used = (p:string,size:number) => sold.reduce((t,x)=>t+(parsePacks(x['packs']).filter(k=>k.p===p&&k.size===size).reduce((a,k)=>a+k.bags+(k.loose>0?1:0),0)),0);
     const packs: PackLine[] = [];
     for (const l of ls) {
@@ -415,15 +712,28 @@ export function populate(slug: string, key: string, value: string, form: Row, da
       if (left>0) { const sz=[...sizes].reverse().find(z=>(avail.get(z)||0)>0&&z>left)||[...sizes].reverse().find(z=>(avail.get(z)||0)>0); if (sz) packs.push({p:l.p,size:sz,bags:0,loose:left}); else packs.push({p:l.p,size:0,bags:0,loose:left}); }
     }
     const bags = packsText(packs, ls);
-    r={...r,buyer:ref['buyer'] || '',item:JSON.stringify(ls),bags,packs:JSON.stringify(packs)};
+    r={...r,buyer:ref['buyer'] || '',item:JSON.stringify(ls),qty:total(ls),bags,packs:JSON.stringify(packs)};
   }
   if (slug === 'packing' && key==='po') {
     const used = (data['packing'] || []).filter(x=>x.id!==form.id && x['po']===value);
     const ls = lines(ref).map(l=>({...l,q:Math.max(0,round(l.q-used.reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0)))})).filter(l=>l.q>0);
     r={...r,buyer:ref['buyer'] || '',item:JSON.stringify(ls)};
   }
-  if (slug === 'returns') r={...r,buyer:ref['buyer'] || '',item:JSON.stringify(lines(ref).map(l=>({...l,q:0})))};
-  if (slug === 'dispatch') r={...r,buyer:ref['buyer'] || '',item:ref['item'] || '',qty:num(ref['qty']) || num(ref['net']),supplier:ref['supplier'] || ''};
+  if (slug === 'returns') {
+    const dispatch = (data['dispatch'] || []).find(entry => entry['so'] === ref.id);
+    r={...r,salesDc:dispatch?.id || '',buyer:ref['buyer'] || '',item:JSON.stringify(lines(ref).map(l=>({...l,q:0})))};
+  }
+  if (slug === 'dispatch') {
+    const buyers = data['buyers'] || [];
+    r={
+      ...r,
+      buyer:ref['buyer'] || '',
+      toLocation:buyerLocation(String(ref['buyer'] || ''), buyers),
+      item:ref['item'] || '',
+      qty:num(ref['qty']) || num(ref['net']),
+      supplier:ref['supplier'] || '',
+    };
+  }
   if (slug === 'transport') {
     const tripBuys = ref['buys'] ? parseBuys(ref['buys']) : [];
     const sup = ref['supplier'] || (tripBuys.length > 0 ? [...new Set(tripBuys.map(b => b.s).filter(Boolean))].join(', ') : '');
@@ -444,8 +754,34 @@ export function populate(slug: string, key: string, value: string, form: Row, da
       charges: num(ref['charges']) || num(r['charges']) || 0,
     };
   }
-  if (slug === 'deliveries') r={...r,buyer:ref['buyer'] || '',accepted:num(ref['qty']),issueQty:0};
-  if (slug === 'invoices') { const sale=(data['sales-orders'] || []).find(x=>x.id===ref['so']); r={...r,buyer:ref['buyer'] || '',taxable:num(sale?.['value'])}; }
+  if (slug === 'deliveries') {
+    const sale = (data['sales-orders'] || []).find(entry => entry.id === ref['so']);
+    const item = ref['item'] || sale?.['item'] || '[]';
+    const dispatchedQty = num(ref['qty']) || num(sale?.['qty']) || total(parseLines(item));
+    r={
+      ...r,
+      buyer:ref['buyer'] || sale?.['buyer'] || '',
+      item,
+      accepted:dispatchedQty,
+      issueQty:0,
+    };
+  }
+  if (slug === 'invoices') {
+    const sale = key === 'so' ? ref : (data['sales-orders'] || []).find(x => x.id === ref['so']);
+    const dispatch = key === 'dc' ? ref : (data['dispatch'] || []).find(entry => entry['so'] === sale?.id);
+    r = {
+      ...r,
+      dc: dispatch?.id || (key === 'dc' ? value : r['dc'] || ''),
+      so: sale?.id || '',
+      buyer: sale?.['buyer'] || ref['buyer'] || '',
+      item: sale?.['item'] || '[]',
+      rate: sale?.['rate'] || r['rate'] || 0,
+      taxable: num(sale?.['value']),
+      gst: r['gst'] || '0',
+      paid: num(r['paid']),
+      status: r['status'] || 'Draft',
+    };
+  }
   if (slug === 'supplier-prices') {
     const tripBuys = ref['buys'] ? parseBuys(ref['buys']) : [];
     let ls: ProductLine[] = [];
@@ -471,9 +807,11 @@ export function populate(slug: string, key: string, value: string, form: Row, da
   return normalize(slug,r);
 }
 const activeSale = (r: Row) => ['Dispatched','Closed'].includes(r.status);
+const hasSalesDispatch = (saleId: string, data: Data) =>
+  (data['dispatch'] || []).some(dispatch => dispatch['so'] === saleId);
 export function validateData(data: Data): string | null {
   const negative = stock(data).find(s=>s.qty < -0.001); if (negative) return `${negative.product}: insufficient ${negative.category} stock (${negative.qty} kg).`;
-  for (const slug of ['purchase-orders','trips','receipts','quality-check','packing','sales-orders','returns','transport','dispatch']) {
+  for (const slug of ['purchase-orders','trips','supplier-prices','receipts','quality-check','packing','sales-orders','returns','transport','dispatch','deliveries']) {
     const seen = new Set<string>();
     for (const r of data[slug] || []) {
       if (seen.has(r.id)) return `Duplicate reference ${r.id}.`; seen.add(r.id);
@@ -482,6 +820,18 @@ export function validateData(data: Data): string | null {
       if (ls.some(l=>!Number.isFinite(l.q) || l.q<0)) return `${r.id}: quantities cannot be negative.`;
       if (['purchase-orders','trips','quality-check','packing','sales-orders','returns'].includes(slug) && (!ls.length || ls.some(l=>l.q<=0 && !(slug==='quality-check' && num(l.ret)>0)))) return `${r.id}: select products with positive KG quantities.`;
       if (slug==='trips' && num(r['rate'])<0) return 'Purchase price cannot be negative.';
+      if (slug==='supplier-prices') {
+        if (!r['dc'] || !r['supplier']) return `${r.id}: select a purchase trip and supplier.`;
+        if (!ls.length || ls.some(line => line.q <= 0)) return `${r.id}: add products with a quantity above zero.`;
+        if (ls.some(line => num(line.r) < 0)) return `${r.id}: product prices cannot be negative.`;
+        if (['Priced', 'Confirmed'].includes(r.status) && ls.some(line => num(line.r) <= 0)) {
+          return `${r.id}: enter a price greater than zero for every product before marking it ${r.status}.`;
+        }
+        const duplicate = (data['supplier-prices'] || []).some(entry =>
+          entry.id !== r.id && entry['dc'] === r['dc'] && entry['supplier'] === r['supplier'],
+        );
+        if (duplicate) return `${r.id}: a supplier price submission already exists for this trip and supplier.`;
+      }
       if (slug==='trips' && r['buys']) {
         const buys = parseBuys(r['buys']);
         if (!buys.length) return `${r.id}: add at least one purchase line.`;
@@ -494,15 +844,19 @@ export function validateData(data: Data): string | null {
         }
       }
       if (slug==='quality-check') {
-        const sourceType = 'receipts'; const ref=(data[sourceType] || []).find(x=>x.id===r['lot']);
-        if (!ref || ref.status!=='Posted') return `${r.id}: select a received, posted source.`;
+        const sourceType = r['sourceType'] === 'Return' ? 'returns' : 'receipts';
+        const ref=(data[sourceType] || []).find(x=>x.id===r['lot']);
+        const validSource = sourceType === 'receipts'
+          ? ref?.status === 'Posted'
+          : !!ref && ['Received','Sent to QC'].includes(ref.status);
+        if (!validSource) return `${r.id}: select a received, posted source.`;
         for (const l of ls) {
           if ([num(l.a),num(l.a2),num(l.b),num(l.ret)].some(q=>q<0) || num(l.a)>l.q || num(l.a2)+num(l.b)>round(l.q-num(l.a)+num(l.ret))) return `${r.id}: grades cannot exceed ${l.p} input quantity.`;
         }
         const distinctProducts = [...new Set(ls.map(l => l.p))];
         for (const p of distinctProducts) {
-          const received = lines(ref,'received').filter(x=>x.p===p).reduce((s,x)=>s+x.q, 0);
-          const graded = (data['quality-check'] || []).filter(x=>x['lot']===r['lot']).reduce((s,x)=>s+(lines(x,'input').filter(i=>i.p===p).reduce((acc, i) => acc + i.q, 0)),0);
+          const received = lines(ref,sourceType==='receipts'?'received':'qty').filter(x=>x.p===p).reduce((s,x)=>s+x.q, 0);
+          const graded = (data['quality-check'] || []).filter(x=>x['lot']===r['lot'] && x['sourceType']===r['sourceType']).reduce((s,x)=>s+(lines(x,'input').filter(i=>i.p===p).reduce((acc, i) => acc + i.q, 0)),0);
           if (graded>received+0.001) return `${r.id}: ${p} is already assigned or graded; input exceeds source.`;
         }
       }
@@ -532,6 +886,11 @@ export function validateData(data: Data): string | null {
         }
       }
       if (slug==='sales-orders') {
+        const saleLines = lines(r);
+        const usesProductPricing = saleLines.some(line => line.saleRate !== undefined);
+        if (usesProductPricing && saleLines.some(line => line.saleRate === undefined || !Number.isFinite(line.saleRate) || line.saleRate <= 0)) {
+          return `${r.id}: each product needs a selling price greater than zero per KG.`;
+        }
         const po=(data['purchase-orders'] || []).find(x=>x.id===r['po']); if (!po) return `${r.id}: select the buyer demand to supply.`;
         if (po['buyer']!==r['buyer']) return 'Sale buyer must match the buyer demand.';
         for (const l of ls) {
@@ -543,8 +902,9 @@ export function validateData(data: Data): string | null {
         }
       }
       if (slug==='returns') {
-        const sale=(data['sales-orders'] || []).find(x=>x.id===r['sale']); if (!sale || !activeSale(sale)) return 'Returns require an original dispatched sale.';
-        for (const l of ls) { const returned=(data['returns'] || []).filter(x=>x['sale']===r['sale']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0); if (returned>(lines(sale).find(x=>x.p===l.p)?.q || 0)+0.001) return `${l.p}: returned quantity exceeds original sale.`; }
+        const sale=(data['sales-orders'] || []).find(x=>x.id===r['sale']); if (!sale || (!activeSale(sale) && !hasSalesDispatch(sale.id,data))) return 'Returns require an original dispatched sale.';
+        if (r['salesDc'] && !(data['dispatch'] || []).some(dispatch => dispatch.id === r['salesDc'] && dispatch['so'] === sale.id)) return 'Select the Sales DC linked to the original sale.';
+        for (const l of ls) { const returned=(data['returns'] || []).filter(x=>x.id!==r.id && x['sale']===r['sale']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0) + l.q; if (returned>(lines(sale).find(x=>x.p===l.p)?.q || 0)+0.001) return `${l.p}: returned quantity exceeds original sale.`; }
       }
       if (slug==='dispatch' || slug==='transport') {
         // Inward Return goes back to a supplier, not against a market trip, so it is checked by container count and supplier.
@@ -558,9 +918,23 @@ export function validateData(data: Data): string | null {
           const targetModule = inward ? 'trips' : outwardReturn ? 'returns' : 'sales-orders';
           const ref = (data[targetModule] || []).find(x => x.id === r[key]);
           if (!ref) return 'Select a valid purchase, return, or sales reference.';
-          if (!inward && !outwardReturn && !activeSale(ref)) return 'Outward transport requires a dispatched sale.';
+          if (slug === 'dispatch' && ref.status !== 'Confirmed' && !activeSale(ref)) return 'Outward dispatch requires a confirmed sales order.';
+          if (slug === 'transport' && !inward && !outwardReturn && !activeSale(ref)) return 'Outward transport requires a dispatched sale.';
           if ((data[slug] || []).filter(x => x[key] === r[key] && (slug === 'dispatch' || x['direction'] === r['direction'])).length > 1) return 'Transport already exists for this reference.';
           if (num(r['qty']) > total(lines(ref, inward ? 'net' : 'qty')) + 0.001) return 'Loading quantity exceeds referenced quantity.';
+        }
+      }
+      if (slug === 'deliveries') {
+        const dispatch = (data['dispatch'] || []).find(entry => entry.id === r['dc']);
+        if (!dispatch) return `${r.id}: select a valid outward Sales DC.`;
+        if ((data['deliveries'] || []).some(entry => entry.id !== r.id && entry['dc'] === r['dc'])) {
+          return `${r.id}: a proof of delivery already exists for this Sales DC.`;
+        }
+        const accepted = num(r['accepted']);
+        const issues = num(r['issueQty']);
+        if (accepted < 0 || issues < 0) return `${r.id}: accepted and issue quantities cannot be negative.`;
+        if (accepted + issues > num(dispatch['qty']) + 0.001) {
+          return `${r.id}: accepted and issue quantities exceed the dispatched quantity.`;
         }
       }
     }
