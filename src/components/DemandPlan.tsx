@@ -285,12 +285,11 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
         const lineBase =
           Number(l.q) ||
           (lines.length === 1 ? Number(po["qty"]) || 0 : totalBase ? 0 : Math.round((Number(po["qty"]) || 0) / lines.length));
-        const lineRatio = totalBase > 0 ? lineBase / totalBase : 1 / Math.max(1, lines.length);
         const extraShare =
           l.extraKg !== undefined
             ? round2(Number(l.extraKg) || 0)
-            : poExtraKg > 0
-            ? round2(poExtraKg * lineRatio)
+            : lines.length === 1 && poExtraKg > 0
+            ? round2(poExtraKg)
             : 0;
         const lineTotal = round2(lineBase + extraShare);
 
@@ -935,6 +934,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
       dc: tripDc || `DC-MKT-4450`,
       buys: JSON.stringify(buys),
       item: JSON.stringify(tripItems.map((i) => ({ p: i.product, q: i.qty }))),
+      demand: tripTotalDemand,
       supplier: supplierSummary,
       net: tripTotalNet,
       rate: tripAvgRate,
@@ -1152,14 +1152,16 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     const po = (data["purchase-orders"] ?? []).find((x) => x.id === poId);
     if (!po) return;
     const ls = parseLines(po["item"]);
-    const totalBase = ls.reduce((s, l) => s + (Number(l.q) || 0), 0);
     const safeLineBuffer = Math.max(0, round2(targetLineBuffer));
     const poExtra = Number(po["extraKg"]) || 0;
 
     const updatedLines = ls.map((l) => {
-      const lineBase = Number(l.q) || 0;
-      const ratio = totalBase > 0 ? lineBase / totalBase : 1 / Math.max(1, ls.length);
-      const currentLineExtra = l.extraKg !== undefined ? Number(l.extraKg) : round2(poExtra * ratio);
+      const currentLineExtra =
+        l.extraKg !== undefined
+          ? Number(l.extraKg)
+          : ls.length === 1 && poExtra > 0
+          ? round2(poExtra)
+          : 0;
       if (l.p === product) {
         return { ...l, extraKg: safeLineBuffer };
       }
@@ -1214,23 +1216,38 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
     setEditingPoBuffer(null);
   };
 
-  // Quick +/- stepper on the consolidation table — adjusts buffer for the product.
-  const handleAdjustProductBuffer = (plan: ProductPlan, delta: number) => {
-    const safeNewBuffer = Math.max(0, round2(plan.extraKg + delta));
-    handleSetProductBuffer(plan, safeNewBuffer);
-  };
-
   // Direct input box handler for extra buffer on the consolidation table (rounded to 2 decimal places)
-  const handleSetProductBuffer = (plan: ProductPlan, newTotalBuffer: number) => {
+  const handleSetProductBuffer = (plan: ProductPlan, newTotalBuffer: number, targetDate?: string) => {
     const safeBuffer = Math.max(0, round2(newTotalBuffer));
     const poIds = Array.from(new Set(plan.buyers.flatMap((b) => b.pos)));
     const pos = poIds
       .map((id) => (data["purchase-orders"] ?? []).find((x) => x.id === id))
       .filter((x): x is Row => !!x);
-    const [first] = pos;
-    if (!first) return;
+    const targetPo = (targetDate ? pos.find((po) => String(po["deliveryDate"] || po["date"]) === targetDate) : null) || pos[0];
+    if (!targetPo) return;
 
-    handleSavePoLineBuffer(first.id, plan.product, safeBuffer);
+    handleSavePoLineBuffer(targetPo.id, plan.product, safeBuffer);
+  };
+
+  // Quick +/- stepper on the consolidation table — adjusts buffer for the product.
+  const handleAdjustProductBuffer = (plan: ProductPlan, delta: number, targetDate?: string) => {
+    const safeNewBuffer = Math.max(0, round2(plan.extraKg + delta));
+    handleSetProductBuffer(plan, safeNewBuffer, targetDate);
+  };
+
+  // Save buffer from inline table input and clear input edit state
+  const handleSaveBuffer = (plan: ProductPlan, targetDate?: string) => {
+    const inputKey = targetDate ? `${targetDate}-${plan.product}` : plan.product;
+    const rawVal = bufferInputs[inputKey];
+    if (rawVal === undefined) return;
+    const parsed = parseFloat(rawVal);
+    const safeVal = isNaN(parsed) ? 0 : Math.max(0, round2(parsed));
+    handleSetProductBuffer(plan, safeVal, targetDate);
+    setBufferInputs((prev) => {
+      const copy = { ...prev };
+      delete copy[inputKey];
+      return copy;
+    });
   };
 
   // All Transport Movements with enriched supplier, buyer & product details
@@ -1375,7 +1392,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
             onClick={() => handleWhatsAppProcurementSheet(false)}
             className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700"
           >
-            <Share2 className="size-3.5" /> WhatsApp Field Manager Sheet
+            <Share2 className="size-3.5" /> WhatsApp Field Manager
           </Button>
         </div>
       </div>
@@ -1837,91 +1854,127 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
                           {/* Extra Buffer KG */}
                           <td className="px-4 py-3">
-                            <div className="flex items-center justify-end gap-1">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setBufferInputs((prev) => {
-                                    const copy = { ...prev };
-                                    delete copy[p.product];
-                                    return copy;
-                                  });
-                                  handleAdjustProductBuffer(p, -BUFFER_STEP);
-                                }}
-                                disabled={p.extraKg <= 0}
-                                title={`Decrease buffer by ${BUFFER_STEP} kg`}
-                                className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-30 dark:text-amber-400"
-                              >
-                                <Minus className="size-3" />
-                              </button>
+                            {(() => {
+                              const inputKey = `${g.date}-${p.product}`;
+                              const isEditing = bufferInputs[inputKey] !== undefined;
+                              return (
+                                <div>
+                                  <div className="flex items-center justify-end gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setBufferInputs((prev) => {
+                                          const copy = { ...prev };
+                                          delete copy[inputKey];
+                                          return copy;
+                                        });
+                                        handleAdjustProductBuffer(p, -BUFFER_STEP, g.date);
+                                      }}
+                                      disabled={p.extraKg <= 0}
+                                      title={`Decrease buffer by ${BUFFER_STEP} kg`}
+                                      className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-30 dark:text-amber-400"
+                                    >
+                                      <Minus className="size-3" />
+                                    </button>
 
-                              <div className="flex items-center">
-                                <input
-                                  type="number"
-                                  step="0.01"
-                                  min="0"
-                                  placeholder="0"
-                                  value={
-                                    bufferInputs[p.product] !== undefined
-                                      ? bufferInputs[p.product]
-                                      : p.extraKg > 0
-                                      ? String(round2(p.extraKg))
-                                      : ""
-                                  }
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    setBufferInputs((prev) => ({ ...prev, [p.product]: val }));
-                                  }}
-                                  onBlur={() => {
-                                    if (bufferInputs[p.product] !== undefined) {
-                                      const parsed = parseFloat(bufferInputs[p.product]);
-                                      handleSetProductBuffer(p, isNaN(parsed) ? 0 : parsed);
-                                      setBufferInputs((prev) => {
-                                        const copy = { ...prev };
-                                        delete copy[p.product];
-                                        return copy;
-                                      });
-                                    }
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                      (e.target as HTMLInputElement).blur();
-                                    }
-                                  }}
-                                  className={cn(
-                                    "w-20 h-7 rounded border px-1.5 text-right font-mono text-xs font-bold transition-all outline-none focus:ring-1",
-                                    p.extraKg > 0
-                                      ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 focus:ring-amber-500"
-                                      : "border-border bg-background text-muted-foreground focus:ring-primary"
+                                    <div className="flex items-center">
+                                      <input
+                                        type="number"
+                                        step="0.01"
+                                        min="0"
+                                        placeholder="0"
+                                        value={
+                                          isEditing
+                                            ? bufferInputs[inputKey]
+                                            : p.extraKg > 0
+                                            ? String(round2(p.extraKg))
+                                            : ""
+                                        }
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          setBufferInputs((prev) => ({ ...prev, [inputKey]: val }));
+                                        }}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter") {
+                                            handleSaveBuffer(p, g.date);
+                                          } else if (e.key === "Escape") {
+                                            setBufferInputs((prev) => {
+                                              const copy = { ...prev };
+                                              delete copy[inputKey];
+                                              return copy;
+                                            });
+                                          }
+                                        }}
+                                        className={cn(
+                                          "w-20 h-7 rounded border px-1.5 text-right font-mono text-xs font-bold transition-all outline-none focus:ring-1",
+                                          isEditing
+                                            ? "border-emerald-500 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100 ring-1 ring-emerald-500"
+                                            : p.extraKg > 0
+                                            ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 focus:ring-amber-500"
+                                            : "border-border bg-background text-muted-foreground focus:ring-primary"
+                                        )}
+                                        title={`Extra buffer for ${p.product} in KG (press Enter or click Save)`}
+                                      />
+                                      <span className="ml-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+                                        kg
+                                      </span>
+                                    </div>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setBufferInputs((prev) => {
+                                          const copy = { ...prev };
+                                          delete copy[inputKey];
+                                          return copy;
+                                        });
+                                        handleAdjustProductBuffer(p, BUFFER_STEP, g.date);
+                                      }}
+                                      title={`Increase buffer by ${BUFFER_STEP} kg`}
+                                      className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
+                                    >
+                                      <Plus className="size-3" />
+                                    </button>
+
+                                    {isEditing && (
+                                      <div className="flex items-center gap-1 ml-1 animate-in fade-in duration-150">
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          onMouseDown={(e) => e.preventDefault()}
+                                          onClick={() => handleSaveBuffer(p, g.date)}
+                                          className="h-7 px-2.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white gap-1 shadow-xs cursor-pointer"
+                                          title="Save buffer"
+                                        >
+                                          <Check className="size-3" />
+                                          <span>Save</span>
+                                        </Button>
+                                        <button
+                                          type="button"
+                                          onMouseDown={(e) => e.preventDefault()}
+                                          onClick={() => {
+                                            setBufferInputs((prev) => {
+                                              const copy = { ...prev };
+                                              delete copy[inputKey];
+                                              return copy;
+                                            });
+                                          }}
+                                          className="flex size-7 shrink-0 items-center justify-center rounded border border-border text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer transition-colors"
+                                          title="Cancel"
+                                        >
+                                          <X className="size-3.5" />
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                  {p.extraKg > 0 && !isEditing && (
+                                    <span className="text-[10px] font-mono text-amber-700/80 dark:text-amber-400 block text-right mt-0.5">
+                                      +{Math.max(0, p.totalPackets - p.basePackets)} pkts buffer
+                                    </span>
                                   )}
-                                  title={`Extra buffer for ${p.product} in KG (rounded to 2 decimal places)`}
-                                />
-                                <span className="ml-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
-                                  kg
-                                </span>
-                              </div>
-
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setBufferInputs((prev) => {
-                                    const copy = { ...prev };
-                                    delete copy[p.product];
-                                    return copy;
-                                  });
-                                  handleAdjustProductBuffer(p, BUFFER_STEP);
-                                }}
-                                title={`Increase buffer by ${BUFFER_STEP} kg`}
-                                className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
-                              >
-                                <Plus className="size-3" />
-                              </button>
-                            </div>
-                            {p.extraKg > 0 && (
-                              <span className="text-[10px] font-mono text-amber-700/80 dark:text-amber-400 block text-right mt-0.5">
-                                +{Math.max(0, p.totalPackets - p.basePackets)} pkts buffer
-                              </span>
-                            )}
+                                </div>
+                              );
+                            })()}
                           </td>
 
                           {/* Total Demand */}
@@ -2051,91 +2104,127 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
                       {/* Extra Buffer KG */}
                       <td className="px-4 py-3">
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setBufferInputs((prev) => {
-                                const copy = { ...prev };
-                                delete copy[p.product];
-                                return copy;
-                              });
-                              handleAdjustProductBuffer(p, -BUFFER_STEP);
-                            }}
-                            disabled={p.extraKg <= 0}
-                            title={`Decrease buffer by ${BUFFER_STEP} kg`}
-                            className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-30 dark:text-amber-400"
-                          >
-                            <Minus className="size-3" />
-                          </button>
+                        {(() => {
+                          const inputKey = p.product;
+                          const isEditing = bufferInputs[inputKey] !== undefined;
+                          return (
+                            <div>
+                              <div className="flex items-center justify-end gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setBufferInputs((prev) => {
+                                      const copy = { ...prev };
+                                      delete copy[inputKey];
+                                      return copy;
+                                    });
+                                    handleAdjustProductBuffer(p, -BUFFER_STEP);
+                                  }}
+                                  disabled={p.extraKg <= 0}
+                                  title={`Decrease buffer by ${BUFFER_STEP} kg`}
+                                  className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-30 dark:text-amber-400"
+                                >
+                                  <Minus className="size-3" />
+                                </button>
 
-                          <div className="flex items-center">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              placeholder="0"
-                              value={
-                                bufferInputs[p.product] !== undefined
-                                  ? bufferInputs[p.product]
-                                  : p.extraKg > 0
-                                  ? String(round2(p.extraKg))
-                                  : ""
-                              }
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setBufferInputs((prev) => ({ ...prev, [p.product]: val }));
-                              }}
-                              onBlur={() => {
-                                if (bufferInputs[p.product] !== undefined) {
-                                  const parsed = parseFloat(bufferInputs[p.product]);
-                                  handleSetProductBuffer(p, isNaN(parsed) ? 0 : parsed);
-                                  setBufferInputs((prev) => {
-                                    const copy = { ...prev };
-                                    delete copy[p.product];
-                                    return copy;
-                                  });
-                                }
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  (e.target as HTMLInputElement).blur();
-                                }
-                              }}
-                              className={cn(
-                                "w-20 h-7 rounded border px-1.5 text-right font-mono text-xs font-bold transition-all outline-none focus:ring-1",
-                                p.extraKg > 0
-                                  ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 focus:ring-amber-500"
-                                  : "border-border bg-background text-muted-foreground focus:ring-primary"
+                                <div className="flex items-center">
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    placeholder="0"
+                                    value={
+                                      isEditing
+                                        ? bufferInputs[inputKey]
+                                        : p.extraKg > 0
+                                        ? String(round2(p.extraKg))
+                                        : ""
+                                    }
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      setBufferInputs((prev) => ({ ...prev, [inputKey]: val }));
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") {
+                                        handleSaveBuffer(p);
+                                      } else if (e.key === "Escape") {
+                                        setBufferInputs((prev) => {
+                                          const copy = { ...prev };
+                                          delete copy[inputKey];
+                                          return copy;
+                                        });
+                                      }
+                                    }}
+                                    className={cn(
+                                      "w-20 h-7 rounded border px-1.5 text-right font-mono text-xs font-bold transition-all outline-none focus:ring-1",
+                                      isEditing
+                                        ? "border-emerald-500 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100 ring-1 ring-emerald-500"
+                                        : p.extraKg > 0
+                                        ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 focus:ring-amber-500"
+                                        : "border-border bg-background text-muted-foreground focus:ring-primary"
+                                    )}
+                                    title={`Extra buffer for ${p.product} in KG (press Enter or click Save)`}
+                                  />
+                                  <span className="ml-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+                                    kg
+                                  </span>
+                                </div>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setBufferInputs((prev) => {
+                                      const copy = { ...prev };
+                                      delete copy[inputKey];
+                                      return copy;
+                                    });
+                                    handleAdjustProductBuffer(p, BUFFER_STEP);
+                                  }}
+                                  title={`Increase buffer by ${BUFFER_STEP} kg`}
+                                  className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
+                                >
+                                  <Plus className="size-3" />
+                                </button>
+
+                                {isEditing && (
+                                  <div className="flex items-center gap-1 ml-1 animate-in fade-in duration-150">
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      onMouseDown={(e) => e.preventDefault()}
+                                      onClick={() => handleSaveBuffer(p)}
+                                      className="h-7 px-2.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white gap-1 shadow-xs cursor-pointer"
+                                      title="Save buffer"
+                                    >
+                                      <Check className="size-3" />
+                                      <span>Save</span>
+                                    </Button>
+                                    <button
+                                      type="button"
+                                      onMouseDown={(e) => e.preventDefault()}
+                                      onClick={() => {
+                                        setBufferInputs((prev) => {
+                                          const copy = { ...prev };
+                                          delete copy[inputKey];
+                                          return copy;
+                                        });
+                                      }}
+                                      className="flex size-7 shrink-0 items-center justify-center rounded border border-border text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer transition-colors"
+                                      title="Cancel"
+                                    >
+                                      <X className="size-3.5" />
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                              {p.extraKg > 0 && !isEditing && (
+                                <span className="text-[10px] font-mono text-amber-700/80 dark:text-amber-400 block text-right mt-0.5">
+                                  +{Math.max(0, p.totalPackets - p.basePackets)} pkts buffer
+                                </span>
                               )}
-                              title={`Extra buffer for ${p.product} in KG (rounded to 2 decimal places)`}
-                            />
-                            <span className="ml-1 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
-                              kg
-                            </span>
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setBufferInputs((prev) => {
-                                const copy = { ...prev };
-                                delete copy[p.product];
-                                return copy;
-                              });
-                              handleAdjustProductBuffer(p, BUFFER_STEP);
-                            }}
-                            title={`Increase buffer by ${BUFFER_STEP} kg`}
-                            className="flex size-6 shrink-0 items-center justify-center rounded border border-amber-500/30 text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
-                          >
-                            <Plus className="size-3" />
-                          </button>
-                        </div>
-                        {p.extraKg > 0 && (
-                          <span className="text-[10px] font-mono text-amber-700/80 dark:text-amber-400 block text-right mt-0.5">
-                            +{Math.max(0, p.totalPackets - p.basePackets)} pkts buffer
-                          </span>
-                        )}
+                            </div>
+                          );
+                        })()}
                       </td>
 
                       {/* Total Demand */}
@@ -3395,12 +3484,11 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                         const totalBase = lines.reduce((s, x) => s + (Number(x.q) || 0), 0);
                         const lineBase = line ? Number(line.q) || 0 : 0;
                         const poExtra = Number(po?.["extraKg"]) || 0;
-                        const ratio = totalBase > 0 ? lineBase / totalBase : 1 / Math.max(1, lines.length);
                         const lineExtra =
                           line?.extraKg !== undefined
                             ? round2(Number(line.extraKg))
-                            : poExtra > 0
-                            ? round2(poExtra * ratio)
+                            : lines.length === 1 && poExtra > 0
+                            ? round2(poExtra)
                             : 0;
                         const lineTotal = round2(lineBase + lineExtra);
                         const linePackets = computePackets(lineTotal, activeProductPlan.packSizeKg);

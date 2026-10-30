@@ -643,9 +643,20 @@ const BASE_MODULES: ModuleDef[] = [
 
 export const MODULES = configureModules(BASE_MODULES, ITEMS);
 
+const MODULE_ROUTE_ALIASES: Record<string, string> = {
+  catalog: "product-catalog",
+  "warehouse-receipt": "receipts",
+  "warehouse-receipts": "receipts",
+  "warehouse-receipt-note": "receipts",
+  "warehouse-receipt-notes": "receipts",
+  "goods-receipt": "receipts",
+  "goods-receipts": "receipts",
+  grn: "receipts",
+};
+
 export const getModule = (slug: string) => {
-  if (slug === "catalog") return MODULES.find((m) => m.slug === "product-catalog");
-  return MODULES.find((m) => m.slug === slug);
+  const canonicalSlug = MODULE_ROUTE_ALIASES[slug] || slug;
+  return MODULES.find((m) => m.slug === canonicalSlug);
 };
 
 export function seedRows(m: ModuleDef): Row[] {

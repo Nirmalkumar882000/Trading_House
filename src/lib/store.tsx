@@ -6,7 +6,7 @@ import type { UserRole } from "./rbac";
 type Data = Record<string, Row[]>;
 const STORAGE_KEY = "trading-house-data";
 const ROLE_STORAGE_KEY = "trading-house-role";
-const CLEAN_VERSION_KEY = "trading-house-portal-clean-v10";
+const CLEAN_VERSION_KEY = "trading-house-portal-clean-v11";
 const CATALOG_STORAGE_KEY = "trading-house-product-catalog";
 
 const loadCatalog = (): ProductItem[] => {

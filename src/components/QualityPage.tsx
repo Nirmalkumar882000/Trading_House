@@ -22,16 +22,18 @@ import {
   Users,
   Zap,
   Building2,
+  type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { ModuleDef, Row } from "@/lib/modules";
 import { PRODUCT_CATALOG, DEFAULT_WAREHOUSE } from "@/lib/modules";
+import { ROLES } from "@/lib/rbac";
 import { useStore } from "@/lib/store";
 import { StatusBadge } from "./StatusBadge";
 import { Button } from "./ui/button";
 import { EmployeeSelect } from "./EmployeeSelect";
 import { cn } from "@/lib/utils";
-import { lines, normalize, num, parseLines, populate, returnsAvailable, round, validateData, type ProductLine } from "@/lib/workflow";
+import { lines, normalize, num, parseLines, populate, receiptBelongsToBuyer, returnsAvailable, round, validateData, type ProductLine } from "@/lib/workflow";
 
 type Tab = "assign" | "s1" | "s2";
 const kg = (v: number) => `${v.toLocaleString("en-IN", { maximumFractionDigits: 2 })} kg`;
@@ -457,10 +459,13 @@ function SplitLineAction({
 }
 
 export function QualityPage({ mod }: { mod: ModuleDef }) {
-  const { data, upsert, remove, nextId } = useStore();
+  const { data, upsert, remove, nextId, role } = useStore();
   const [tab, setTab] = useState<Tab>("assign");
   const rows = data["quality-check"] ?? [];
   const receipts = data["receipts"] ?? [];
+  const trips = data["trips"] ?? [];
+  const purchaseOrders = data["purchase-orders"] ?? [];
+  const currentBuyer = role === "Buyer" ? ROLES.Buyer.buyerName : undefined;
 
   // Table search & expansion state
   const [searchQuery, setSearchQuery] = useState("");
@@ -472,8 +477,17 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
   };
 
   const filteredRecords = useMemo(() => {
-    return rows
+    const records = data["quality-check"] ?? [];
+    const receiptRows = data["receipts"] ?? [];
+    const tripRows = data["trips"] ?? [];
+    const orderRows = data["purchase-orders"] ?? [];
+    return records
       .filter((r) => r.status !== "Assigned")
+      .filter((r) => {
+        if (!currentBuyer) return true;
+        const receipt = receiptRows.find((item) => item.id === r["lot"]);
+        return !!receipt && receiptBelongsToBuyer(receipt, currentBuyer, tripRows, orderRows);
+      })
       .filter((r) => {
         if (statusFilter !== "all" && r.status !== statusFilter) return false;
         if (!searchQuery.trim()) return true;
@@ -485,7 +499,7 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
         const matchProducts = lines(r, "input").some((l) => l.p.toLowerCase().includes(q));
         return matchRef || matchLot || matchGrader || matchSupervisor || matchProducts;
       });
-  }, [rows, statusFilter, searchQuery]);
+  }, [data, currentBuyer, statusFilter, searchQuery]);
 
   const toggleExpandAll = () => {
     const hasAnyOpen = Object.values(expandedRows).some(Boolean);
@@ -785,7 +799,7 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
     setLot2("");
   };
 
-  const tabs: { key: Tab; label: string; count: number; icon: any }[] = [
+  const tabs: { key: Tab; label: string; count: number; icon: LucideIcon }[] = [
     { key: "assign", label: "1. Assign Employees & Split Lines", count: stage1Receipts.length, icon: Users },
     { key: "s1", label: "2. First QC Check (Grade A Entry)", count: s1.length > 0 ? s1.length : stage1Receipts.length, icon: Sparkles },
     { key: "s2", label: "3. Stage 2 (Secondary & Returns)", count: pending.length, icon: Layers },
@@ -793,6 +807,56 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
 
   const totalInputKg = s1.reduce((sum, l) => sum + (Number(l.q) || 0), 0);
   const totalBoxes = s1.reduce((sum, l) => sum + (Number(l.box) || 0), 0);
+
+  if (role === "Buyer") {
+    return (
+      <div className="mx-auto max-w-7xl space-y-5">
+        <div>
+          <span className="text-xs font-semibold uppercase tracking-wider text-primary">{mod.stage} · {mod.flows}</span>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-foreground lg:text-3xl">{mod.title}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Quality check results for {currentBuyer}. Only records linked to your purchase orders are shown.
+          </p>
+        </div>
+        {filteredRecords.length ? (
+          <div className="overflow-x-auto rounded-xl border bg-card shadow-xs">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-muted/60 text-[10px] uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2.5 font-semibold">QC Batch</th>
+                  <th className="px-3 py-2.5 font-semibold">Source Receipt</th>
+                  <th className="px-3 py-2.5 font-semibold">Products & Input KG</th>
+                  <th className="px-3 py-2.5 font-semibold">Quality Output</th>
+                  <th className="px-3 py-2.5 font-semibold">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {filteredRecords.map((record) => (
+                  <tr key={record.id}>
+                    <td className="px-3 py-3 align-top font-mono font-bold text-primary">{record.id}</td>
+                    <td className="px-3 py-3 align-top">{String(record["lot"] || "—")}</td>
+                    <td className="px-3 py-3 align-top">
+                      {lines(record, "input").map((line, index) => (
+                        <div key={`${line.p}-${index}`}>{line.p} · {kg(line.q)}</div>
+                      ))}
+                    </td>
+                    <td className="px-3 py-3 align-top">
+                      Grade A {kg(num(record["gradeA"]))} · Grade B {kg(num(record["gradeB"]))} · Rejected {kg(num(record["trash"]))}
+                    </td>
+                    <td className="px-3 py-3 align-top"><StatusBadge status={record.status} statuses={mod.statuses} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-dashed bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+            No quality check records are available for {currentBuyer}.
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-7xl space-y-5">
@@ -1601,7 +1665,7 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
                                   {rLines.map((lineItem, lIdx) => {
                                     const lineGradeA = num(lineItem.a);
                                     const lineRemainder = Math.max(0, round(lineItem.q - lineGradeA));
-                                    const itemGrader = (lineItem as QCLineItem).grader || r["grader"] || "—";
+                                    const itemGrader = lineItem.grader || String(r["grader"] || "—");
                                     const graders = itemGrader.split(",").map((s) => s.trim()).filter(Boolean);
 
                                     return (

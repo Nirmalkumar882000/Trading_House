@@ -37,6 +37,7 @@ import {
   normalize,
   validateData,
   parseBuys,
+  type ProductLine,
 } from "@/lib/workflow";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
@@ -80,7 +81,23 @@ interface GRNLine {
   packKg: number;
   packLabel: string;
   category?: string;
+  reason: string;
 }
+
+const DIFFERENCE_REASONS = [
+  "—",
+  "Moisture loss",
+  "Spillage",
+  "Scale variance",
+  "Damaged in transit",
+];
+
+const suggestedDifferenceReason = (sent: number, received: number) => {
+  const difference = round(received - sent);
+  if (difference === 0) return "—";
+  if (difference > 0) return "Scale variance";
+  return difference / (sent || 1) <= -0.1 ? "Spillage" : "Moisture loss";
+};
 
 interface WarehouseReceiptDialogProps {
   row: Row;
@@ -125,9 +142,6 @@ export function WarehouseReceiptDialog({
     num(row["containerCount"]) || 16
   );
 
-  // Difference Reason
-  const [reason, setReason] = useState<string>(String(row["reason"] || "—"));
-
   // Active Selected Trip
   const selectedTrip = useMemo(() => {
     return (data["trips"] ?? []).find((t) => t.id === dc);
@@ -156,7 +170,8 @@ export function WarehouseReceiptDialog({
         const spec = PRODUCT_CATALOG.find(
           (p) => p.name.toLowerCase() === l.p.toLowerCase()
         );
-        const sentVal = (l as any).sentQ !== undefined ? num((l as any).sentQ) : l.q;
+        const line = l as ProductLine;
+        const sentVal = line.sentQ !== undefined ? num(line.sentQ) : l.q;
         const def = getDefaultContainer(
           l.p,
           l.q,
@@ -166,14 +181,15 @@ export function WarehouseReceiptDialog({
           p: l.p,
           sentQ: sentVal,
           q: l.q,
-          containerType: (l as any).containerType || def.type,
+          containerType: line.containerType || def.type,
           containerCount:
-            (l as any).containerCount !== undefined
-              ? num((l as any).containerCount)
+            line.containerCount !== undefined
+              ? num(line.containerCount)
               : def.count,
           packKg: spec?.packSizeKg || l.packKg || 0.5,
           packLabel: spec?.defaultPackSize || l.packLabel || "500 g",
           category: spec?.category || "Produce",
+          reason: line.reason || (Math.abs(l.q - sentVal) > 0.001 ? String(row["reason"] || "—") : "—"),
         };
       });
     }
@@ -203,6 +219,7 @@ export function WarehouseReceiptDialog({
           packKg: spec?.packSizeKg || 0.5,
           packLabel: spec?.defaultPackSize || "500 g",
           category: spec?.category || "Produce",
+          reason: "—",
         };
       });
     }
@@ -249,10 +266,10 @@ export function WarehouseReceiptDialog({
           packKg: spec?.packSizeKg || 0.5,
           packLabel: spec?.defaultPackSize || "500 g",
           category: spec?.category || "Produce",
+          reason: "—",
         };
       });
       setLinesState(mapped);
-      setReason("—");
       toast.success(`Loaded ${mapped.length} products from ${trip.id}`);
     }
   };
@@ -278,6 +295,7 @@ export function WarehouseReceiptDialog({
       packKg: spec?.packSizeKg || 0.5,
       packLabel: spec?.defaultPackSize || "500 g",
       category: spec?.category || "Produce",
+      reason: "—",
     };
     setLinesState((prev) => [...prev, newLine]);
     setProductToAdd("");
@@ -297,7 +315,8 @@ export function WarehouseReceiptDialog({
   const handleLineContainerTypeChange = (idx: number, type: string) => {
     setLinesState((prev) => {
       const copy = [...prev];
-      copy[idx] = { ...copy[idx], containerType: type };
+      const line = copy[idx];
+      if (line) copy[idx] = { ...line, containerType: type };
       return copy;
     });
   };
@@ -306,9 +325,16 @@ export function WarehouseReceiptDialog({
     const safeCount = Math.max(0, Math.round(Number(count) || 0));
     setLinesState((prev) => {
       const copy = [...prev];
-      copy[idx] = { ...copy[idx], containerCount: safeCount };
+      const line = copy[idx];
+      if (line) copy[idx] = { ...line, containerCount: safeCount };
       return copy;
     });
+  };
+
+  const handleLineReasonChange = (idx: number, lineReason: string) => {
+    setLinesState((prev) => prev.map((line, index) => (
+      index === idx ? { ...line, reason: lineReason } : line
+    )));
   };
 
   // Aggregated Weight Calculations
@@ -352,19 +378,16 @@ export function WarehouseReceiptDialog({
     const val = Math.max(0, round(newQty));
     setLinesState((prev) => {
       const copy = [...prev];
-      copy[index] = { ...copy[index], q: val };
+      const line = copy[index];
+      if (line) {
+        copy[index] = {
+          ...line,
+          q: val,
+          reason: suggestedDifferenceReason(line.sentQ, val),
+        };
+      }
       return copy;
     });
-
-    // Auto-update difference reason if not manually set
-    const tempReceived = linesState.reduce((s, l, i) => s + (i === index ? val : l.q), 0);
-    const tempDiff = round(tempReceived - totalSentKg);
-    if (tempDiff === 0) {
-      setReason("—");
-    } else if (tempDiff < 0) {
-      const pct = (tempDiff / (totalSentKg || 1)) * 100;
-      setReason(pct <= -10 ? "Spillage" : "Moisture loss");
-    }
   };
 
   // 1-Click Wastage / Proportional Auto-Distribution
@@ -379,26 +402,26 @@ export function WarehouseReceiptDialog({
     const scale = round(1 - lossPct / 100);
     const targetReceivedTotal = round(totalSentKg * scale);
 
+    const reason = lossPct === 0 ? "—" : lossPct >= 10 ? "Spillage" : "Moisture loss";
     setLinesState((prev) =>
       prev.map((l) => {
         const base = l.sentQ > 0 ? l.sentQ : l.q;
+        const received = round(base * scale);
         return {
           ...l,
-          q: round(base * scale),
+          q: received,
+          reason: suggestedDifferenceReason(base, received) === "—" ? "—" : reason,
         };
       })
     );
 
     if (lossPct === 0) {
-      setReason("—");
       toast.success(`Restored 100% exact weight: ${totalSentKg} kg (0 kg variance)`);
     } else if (lossPct >= 10) {
-      setReason("Spillage");
       toast.warning(
         `Applied -${lossPct}% High Transit Wastage (-${round(totalSentKg - targetReceivedTotal)} kg) proportionally across ${linesState.length} products.`
       );
     } else {
-      setReason("Moisture loss");
       toast.info(
         `Applied -${lossPct}% Transit Loss (-${round(totalSentKg - targetReceivedTotal)} kg) proportionally across all lines.`
       );
@@ -414,20 +437,14 @@ export function WarehouseReceiptDialog({
     setLinesState((prev) =>
       prev.map((l) => {
         const base = l.sentQ > 0 ? l.sentQ : l.q;
+        const received = round(base * scale);
         return {
           ...l,
-          q: round(base * scale),
+          q: received,
+          reason: suggestedDifferenceReason(base, received),
         };
       })
     );
-
-    const netDiff = round(target - totalSentKg);
-    if (netDiff === 0) {
-      setReason("—");
-    } else if (netDiff < 0) {
-      const pct = (netDiff / totalSentKg) * 100;
-      setReason(pct <= -10 ? "Spillage" : "Moisture loss");
-    }
   };
 
   // Form submission & validation
@@ -454,10 +471,22 @@ export function WarehouseReceiptDialog({
       return;
     }
 
-    if (diffKg !== 0 && (!reason || reason === "—")) {
-      toast.error("Please select a Difference Reason for the transit variance");
+    const lineWithMissingReason = linesState.find(
+      (line) => round(line.q - line.sentQ) !== 0 && (!line.reason || line.reason === "—")
+    );
+    if (lineWithMissingReason) {
+      toast.error(`Please select a Difference Reason for ${lineWithMissingReason.p}`);
       return;
     }
+
+    const varianceReasons = [...new Set(
+      linesState.filter((line) => round(line.q - line.sentQ) !== 0).map((line) => line.reason)
+    )];
+    const receiptReason = varianceReasons.length === 0
+      ? "—"
+      : varianceReasons.length === 1
+        ? varianceReasons[0] || "—"
+        : "Multiple reasons";
 
     const receiptPayload: Row = normalize("receipts", {
       ...row,
@@ -470,7 +499,7 @@ export function WarehouseReceiptDialog({
       sent: totalSentKg,
       received: totalReceivedKg,
       diff: diffKg,
-      reason,
+      reason: receiptReason,
       containerType,
       containerCount: totalLineContainers > 0 ? totalLineContainers : containerCount,
       responsible,
@@ -483,6 +512,7 @@ export function WarehouseReceiptDialog({
           containerCount: l.containerCount,
           packKg: l.packKg,
           packLabel: l.packLabel,
+          reason: l.reason,
         }))
       ),
     });
@@ -683,6 +713,7 @@ export function WarehouseReceiptDialog({
                     <th className="py-2 px-3 text-right w-32">Received KG (Bay Net)</th>
                     <th className="py-2 px-3 text-center w-56">Containers (Type & Box Count)</th>
                     <th className="py-2 px-3 text-right">Difference</th>
+                    <th className="py-2 px-3 text-center min-w-40">Difference Reason</th>
                     <th className="py-2 px-3 w-10 text-center"></th>
                   </tr>
                 </thead>
@@ -765,6 +796,21 @@ export function WarehouseReceiptDialog({
                               </span>
                             )}
                           </span>
+                        </td>
+                        <td className="py-2 px-3 text-center">
+                          <select
+                            aria-label={`${l.p} difference reason`}
+                            value={l.reason}
+                            onChange={(e) => handleLineReasonChange(idx, e.target.value)}
+                            disabled={lineDiff === 0}
+                            className="h-7 w-full min-w-36 rounded border bg-background px-1.5 text-[11px] font-medium text-foreground focus:ring-1 focus:ring-primary outline-none"
+                          >
+                            {DIFFERENCE_REASONS.map((option) => (
+                              <option key={option} value={option}>
+                                {option === "—" ? "— (No variance)" : option}
+                              </option>
+                            ))}
+                          </select>
                         </td>
                         <td className="py-2 px-3 text-center">
                           <button
@@ -966,22 +1012,8 @@ export function WarehouseReceiptDialog({
                 </button>
               </div>
 
-              {/* Difference Reason Selector */}
-              <div className="flex items-center gap-2">
-                <label className="text-[11px] font-semibold text-muted-foreground whitespace-nowrap">
-                  Difference Reason:
-                </label>
-                <select
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  className="h-7 rounded-md border bg-background px-2 text-xs font-medium focus:ring-1 focus:ring-primary outline-none"
-                >
-                  <option value="—">— (No variance)</option>
-                  <option value="Moisture loss">Moisture loss</option>
-                  <option value="Spillage">Spillage</option>
-                  <option value="Scale variance">Scale variance</option>
-                  <option value="Damaged in transit">Damaged in transit</option>
-                </select>
+              <div className="text-[11px] text-muted-foreground">
+                Select a reason on each product line with a transit variance.
               </div>
             </div>
           </div>

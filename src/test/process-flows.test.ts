@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { OPEN_POINTS } from "@/components/OpenPointsRegister";
 import { PROCESS_FLOWS } from "@/components/ProcessFlowMap";
-import { ROLES, canViewPrice, maskPriceIfRestricted } from "@/lib/rbac";
+import { ROLES, canViewPrice, isModuleAllowedForRole, maskPriceIfRestricted } from "@/lib/rbac";
 import { MODULES, seedRows, type Row } from "@/lib/modules";
-import { normalize, lines, stock, validateData, syncReceiptContainers, movements, populate, type Data } from "@/lib/workflow";
+import { normalize, lines, stock, validateData, syncReceiptContainers, movements, populate, receiptBelongsToBuyer, type Data } from "@/lib/workflow";
 import { getProductPackSpec, computePackets } from "@/components/DemandPlan";
 
 const demo = (): Data => Object.fromEntries(MODULES.map((m) => [m.slug, seedRows(m)]));
@@ -89,6 +89,50 @@ describe("Trading House F01-F28 & C01-C14 Business Rules", () => {
     expect(receiptMod.validate?.(validReceipt)).toBeNull();
   });
 
+  it("F07: Receipt lines validate and retain a separate reason for each product variance", () => {
+    const data = demo();
+    const trip = normalize("trips", {
+      id: "TRP-9002",
+      status: "Submitted",
+      signatures: "3",
+      item: JSON.stringify([{ p: "Tomato", q: 10 }, { p: "Onion", q: 10 }]),
+      net: 20,
+      rate: 30,
+    });
+    const receipt = normalize("receipts", {
+      id: "GRN-9002",
+      status: "Posted",
+      dc: trip.id,
+      sent: 20,
+      received: 18.5,
+      diff: -1.5,
+      reason: "Multiple reasons",
+      item: JSON.stringify([
+        { p: "Tomato", sentQ: 10, q: 9, reason: "Moisture loss" },
+        { p: "Onion", sentQ: 10, q: 9.5, reason: "Spillage" },
+      ]),
+    });
+    data["trips"] = [...(data["trips"] ?? []), trip];
+    data["receipts"] = [...(data["receipts"] ?? []), receipt];
+
+    expect(validateData(data)).toBeNull();
+    expect(lines(receipt, "received").map((line) => line.reason)).toEqual([
+      "Moisture loss",
+      "Spillage",
+    ]);
+
+    const missingLineReason = normalize("receipts", {
+      ...receipt,
+      item: JSON.stringify([
+        { p: "Tomato", sentQ: 10, q: 9, reason: "Moisture loss" },
+        { p: "Onion", sentQ: 10, q: 9.5, reason: "—" },
+      ]),
+    });
+    data["receipts"] = [...(data["receipts"] ?? []).filter((line) => line.id !== receipt.id), missingLineReason];
+
+    expect(validateData(data)).toMatch(/Onion: a difference reason is required/);
+  });
+
   it("F11 & F12: Two-Stage QC outputs must reconcile with input", () => {
     const d = demo();
     const qcRecords = d["quality-check"] ?? [];
@@ -106,6 +150,29 @@ describe("Trading House F01-F28 & C01-C14 Business Rules", () => {
       expect(trash).toBeGreaterThanOrEqual(0);
       expect(gradeA + gradeB).toBeLessThanOrEqual(input + 50); // bounded
     }
+  });
+
+  it("Buyer quality-check view only resolves receipts linked to the logged-in buyer's PO", () => {
+    const receipt = { id: "GRN-BUYER", status: "Posted", dc: "TRP-BUYER" };
+    const trips = [
+      { id: "TRP-BUYER", status: "Submitted", po: "PO-FRESHMART" },
+      { id: "TRP-OTHER", status: "Submitted", po: "PO-OTHER" },
+    ] as Row[];
+    const purchaseOrders = [
+      { id: "PO-FRESHMART", status: "Accepted", buyer: "FreshMart Retail" },
+      { id: "PO-OTHER", status: "Accepted", buyer: "Nilgiris Supermarket" },
+    ] as Row[];
+
+    expect(ROLES.Buyer.buyerName).toBe("FreshMart Retail");
+    expect(isModuleAllowedForRole("quality-check", "Buyer")).toBe(true);
+    expect(receiptBelongsToBuyer(receipt, "FreshMart Retail", trips, purchaseOrders)).toBe(true);
+    expect(receiptBelongsToBuyer(receipt, "Nilgiris Supermarket", trips, purchaseOrders)).toBe(false);
+    expect(receiptBelongsToBuyer(
+      { ...receipt, dc: "TRP-UNKNOWN" },
+      "FreshMart Retail",
+      trips,
+      purchaseOrders,
+    )).toBe(false);
   });
 
   it("F15: QR sticker payload strictly excludes selling price", () => {
@@ -738,7 +805,5 @@ describe("Trading House F01-F28 & C01-C14 Business Rules", () => {
     expect(totalBasePackets).toBe(480);
   });
 });
-
-
 
 

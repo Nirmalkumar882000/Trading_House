@@ -29,6 +29,7 @@ export interface RoleDef {
   canManageTrips: boolean;
   canViewReports: boolean;
   primaryModules: string[];
+  buyerName?: string;
   credentials: {
     email: string;
     username: string;
@@ -282,7 +283,8 @@ export const ROLES: Record<UserRole, RoleDef> = {
     canManageSales: true,
     canManageTrips: false,
     canViewReports: false,
-    primaryModules: ["catalogue", "purchase-orders", "deliveries", "invoices"],
+    primaryModules: ["catalogue", "purchase-orders", "deliveries", "invoices", "quality-check"],
+    buyerName: "FreshMart Retail",
     credentials: {
       email: "buyer@freshmart.com",
       username: "freshmart_buyer",
@@ -352,4 +354,3 @@ export function isModuleAllowedForRole(slug: string, role: UserRole): boolean {
   const allowed = ROLES[role]?.primaryModules ?? [];
   return allowed.includes(slug);
 }
-

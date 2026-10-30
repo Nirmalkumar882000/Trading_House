@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MODULES, seedRows, type Row, getPackSpecOptions, PRODUCT_CATALOG } from '@/lib/modules';
-import { bagBreakdown, normalize, populate, stock, validateData, parseLines, type Data } from '@/lib/workflow';
+import { bagBreakdown, marketTripDemand, normalize, populate, stock, validateData, parseLines, type Data } from '@/lib/workflow';
 import { outstandingDemand } from '@/lib/sourcing';
 const demo=():Data=>Object.fromEntries(MODULES.map(m=>[m.slug,seedRows(m)]));
 const quantity=(data:Data,product:string,category:string)=>stock(data).find(s=>s.product===product&&s.category===category)?.qty||0;
@@ -48,6 +48,29 @@ describe('Integrated stock workflow',()=>{
    const normalized = normalize('purchase-orders', po);
    expect(normalized['qty']).toBe(70);
    expect(normalized['extraKg']).toBe(20);
+ });
+ it('calculates a trip demand from its selected products instead of its purchased net weight', () => {
+   const products = [
+     ['Amaranth Green Leaves (Arai Keerai)', 125],
+     ['Amaranth Red Leaves (Red Mulai Keerai)', 115],
+     ['Banana Poovan Semi Ripe', 125],
+     ['Beans Broad (Avarakkaai)', 120],
+     ['Chilli Green Gundu (Bullet Chilli)', 110],
+     ['Lady Finger (Vendikaai)', 125],
+   ] as const;
+   const trip: Row = {
+     id: 'TRP-1008',
+     status: 'Submitted',
+     item: JSON.stringify(products.map(([p]) => ({ p, q: 85 }))),
+     net: 510,
+   };
+   const purchaseOrders: Row[] = products.map(([p, q], index) => ({
+     id: `PO-${index}`,
+     status: 'Accepted',
+     item: JSON.stringify([{ p, q }]),
+   }));
+
+   expect(marketTripDemand(trip, purchaseOrders)).toBe(720);
  });
   it('correctly attributes packing to a specific buyer PO and preserves balance for another buyer with the same product', () => {
     const product = 'Amaranth Green Leaves (Arai Keerai)';

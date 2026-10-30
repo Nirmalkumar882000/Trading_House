@@ -1,7 +1,7 @@
 import type { Row } from './modules';
 import { WAREHOUSES, DEFAULT_WAREHOUSE } from './modules';
 export type Data = Record<string, Row[]>;
-export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; packKg?: number; packLabel?: string; containerType?: string; containerCount?: number; extraKg?: number };
+export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; packKg?: number; packLabel?: string; containerType?: string; containerCount?: number; extraKg?: number; reason?: string; sentQ?: number; grader?: string; lineTag?: string; startTime?: string; box?: number };
 export const num = (v: unknown) => Number(v) || 0;
 export const round = (v: number) => Math.round(v * 1000) / 1000;
 export function parseLines(v: unknown): ProductLine[] {
@@ -19,10 +19,52 @@ export function parseLines(v: unknown): ProductLine[] {
         ...(l.containerType !== undefined ? { containerType: String(l.containerType) } : {}),
         ...(l.containerCount !== undefined ? { containerCount: num(l.containerCount) } : {}),
         ...(l.extraKg !== undefined ? { extraKg: num(l.extraKg) } : {}),
+        ...(l.reason !== undefined ? { reason: String(l.reason) } : {}),
+        ...(l.sentQ !== undefined ? { sentQ: num(l.sentQ) } : {}),
+        ...(l.grader !== undefined ? { grader: String(l.grader) } : {}),
+        ...(l.lineTag !== undefined ? { lineTag: String(l.lineTag) } : {}),
+        ...(l.startTime !== undefined ? { startTime: String(l.startTime) } : {}),
+        ...(l.box !== undefined ? { box: num(l.box) } : {}),
       }));
     }
   } catch { /* legacy product names */ }
   return String(v).split(',').filter(Boolean).map(p => ({ p: p.trim(), q: 0 }));
+}
+export function marketTripDemand(trip: Row, purchaseOrders: Row[]): number {
+  const tripProducts = new Set(parseLines(trip['item']).map(line => line.p));
+  if (!tripProducts.size) return 0;
+
+  const demandByProduct = new Map<string, number>();
+  for (const po of purchaseOrders) {
+    if (po.status === 'Rejected') continue;
+    const orderLines = parseLines(po['item']);
+    const totalBase = orderLines.reduce((sum, line) => sum + num(line.q), 0);
+    const extraKg = num(po['extraKg']);
+
+    for (const line of orderLines) {
+      const base = num(line.q) || (orderLines.length === 1 ? num(po['qty']) : totalBase ? 0 : Math.round(num(po['qty']) / orderLines.length));
+      const extra = line.extraKg !== undefined
+        ? num(line.extraKg)
+        : orderLines.length === 1 && extraKg > 0
+          ? extraKg
+          : 0;
+      demandByProduct.set(line.p, round((demandByProduct.get(line.p) || 0) + base + extra));
+    }
+  }
+
+  return round([...tripProducts].reduce((sum, product) => sum + (demandByProduct.get(product) || 0), 0));
+}
+export function receiptBelongsToBuyer(
+  receipt: Row,
+  buyerName: string,
+  trips: Row[],
+  purchaseOrders: Row[],
+): boolean {
+  const receiptTripRef = String(receipt['dc'] || '');
+  const trip = trips.find(item => item.id === receiptTripRef || item['dc'] === receiptTripRef);
+  const poRef = String(trip?.['po'] || receipt['po'] || '');
+  const purchaseOrder = purchaseOrders.find(order => order.id === poRef);
+  return String(purchaseOrder?.['buyer'] || '') === buyerName;
 }
 export function lines(r: Row, fallback = 'qty') { const ls = parseLines(r['item']); return ls.map(l => ({ ...l, q: l.q || (ls.length === 1 ? num(r[fallback]) : 0) })); }
 export const total = (ls: ProductLine[]) => round(ls.reduce((s,l) => s + l.q, 0));
@@ -468,6 +510,15 @@ export function validateData(data: Data): string | null {
         const ref=(data['trips'] || []).find(x=>x.id===r['dc']); if (!ref || ref.status!=='Submitted') return `${r.id}: select a submitted purchase.`;
         if ((data['receipts'] || []).filter(x=>x['dc']===r['dc']).length>1) return 'A purchase can have only one warehouse receipt.';
         for (const l of ls) if (l.q>(lines(ref,'net').find(x=>x.p===l.p)?.q || 0)+0.001) return `${l.p}: receipt exceeds purchased quantity.`;
+        const hasLineReasons = ls.some(l => l.reason !== undefined);
+        if (hasLineReasons) {
+          for (const l of ls) {
+            const sent = num(l.sentQ) || (lines(ref, 'net').find(x => x.p === l.p)?.q || 0);
+            if (Math.abs(l.q - sent) > 0.001 && (!l.reason || l.reason === '—')) {
+              return `${l.p}: a difference reason is required for its transit variance.`;
+            }
+          }
+        }
       }
       if (slug==='packing') {
         if (num(r['packSize'])<=0) return 'Bag size must be greater than zero KG.';

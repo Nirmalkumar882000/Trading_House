@@ -10,7 +10,7 @@ interface GoodsReceiptVoucherModalProps {
   isOpen: boolean;
   onClose: () => void;
   receipt: Row;
-  trip?: Row;
+  trip?: Row | undefined;
   onProceedToQc?: () => void;
 }
 
@@ -161,7 +161,7 @@ export function GoodsReceiptVoucherModal({
                   </td>
                   <td className="px-4 py-2.5 text-center">
                     <span className="inline-block rounded-md bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
-                      {reason}
+                      {String(it.reason || reason)}
                     </span>
                   </td>
                   <td className="px-4 py-2.5 text-right">

@@ -28,7 +28,7 @@ import { cn } from "@/lib/utils";
 import { outstandingDemand } from "@/lib/sourcing";
 import { Button } from "./ui/button";
 import { EmployeeSelect } from "./EmployeeSelect";
-import { bagBreakdown, buysFromTrip, parseBuys, returnsAvailable, lines, normalize, num, parseLines, populate, referenceModule, stock, syncReceiptDownstream, total, validateData, round, type ProductLine } from "@/lib/workflow";
+import { bagBreakdown, buysFromTrip, marketTripDemand, parseBuys, returnsAvailable, lines, normalize, num, parseLines, populate, referenceModule, stock, syncReceiptDownstream, total, validateData, round, type ProductLine } from "@/lib/workflow";
 export { parseLines } from "@/lib/workflow";
 
 function getCreateButtonLabel(slug: string, title: string): string {
@@ -132,6 +132,14 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
         }
         const receivable = Math.max(0, billed - collections - credits);
         return { ...b, receivable };
+      });
+    }
+    if (mod.slug === "trips") {
+      const purchaseOrders = data["purchase-orders"] ?? [];
+      return baseRows.map((trip) => {
+        if (trip["demand"] !== undefined) return trip;
+        const demand = marketTripDemand(trip, purchaseOrders);
+        return demand > 0 ? { ...trip, demand } : trip;
       });
     }
     return baseRows;
