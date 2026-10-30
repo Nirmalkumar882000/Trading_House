@@ -461,12 +461,11 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
     const pcKg = prodSpec?.packSizeKg || 1.0;
 
     if (top) {
-      // Pre-fill top demand: target size × required packet count
+      // Pre-fill top demand: target size × required packet count (single line by default)
       const topSize = top.packSizeKg > 0 ? top.packSizeKg : isPieceBased ? pcKg : 0.5;
       const topPacks = top.balancePacks > 0 ? top.balancePacks : 25;
       const topQty = round(Math.min(remainingStock, topPacks * topSize));
       const actualPacks = topSize > 0 ? Math.ceil(topQty / topSize) : topPacks;
-      const rem = Math.max(0, round(remainingStock - topQty));
 
       const linesArr: SplitItem[] = [
         {
@@ -478,46 +477,16 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
         },
       ];
 
-      if (rem > 0) {
-        const next = demands.find((d) => d.poId !== top.poId);
-        if (next) {
-          const nextSize = next.packSizeKg > 0 ? next.packSizeKg : isPieceBased ? pcKg : 0.5;
-          const nextPacks = Math.min(next.balancePacks || 50, Math.ceil(rem / nextSize));
-          const nextQty = round(Math.min(rem, nextPacks * nextSize));
-          linesArr.push({
-            size: nextSize,
-            packs: nextPacks,
-            qty: nextQty,
-            poId: next.poId,
-            buyer: next.buyer,
-          });
-        } else {
-          const defSize = isPieceBased ? pcKg : 0.5;
-          const defPacks = defSize > 0 ? Math.ceil(rem / defSize) : 0;
-          linesArr.push({
-            size: defSize,
-            packs: defPacks,
-            qty: rem,
-            poId: "",
-            buyer: "",
-          });
-        }
-      }
-
       setSplits(linesArr);
       setSplitTargetPo(top.poId);
     } else {
-      // Default: Piece or Weight based
+      // Default: Piece or Weight based (single line by default)
       const defSize = isPieceBased ? pcKg : 0.5;
       const defPacks = Math.max(1, Math.floor(remainingStock / defSize));
       const defQty = round(defPacks * defSize);
-      const rem = Math.max(0, round(remainingStock - defQty));
-      const nextSize = isPieceBased ? pcKg : 1.0;
-      const nextPacks = nextSize > 0 ? Math.ceil(rem / nextSize) : 0;
 
       setSplits([
         { size: defSize, packs: defPacks, qty: defQty, poId: targetPoId },
-        { size: nextSize, packs: nextPacks, qty: rem, poId: "" },
       ]);
     }
   };
@@ -2114,16 +2083,6 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                                         buyer: b.buyer,
                                       },
                                     ];
-                                    if (remKg > 0) {
-                                      const defaultSize = isPieceBased ? pcKg : 0.5;
-                                      newSplits.push({
-                                        size: defaultSize,
-                                        packs: defaultSize > 0 ? Math.ceil(remKg / defaultSize) : 0,
-                                        qty: remKg,
-                                        poId: "",
-                                        buyer: "",
-                                      });
-                                    }
                                     setSplits(newSplits);
                                     setSplitTargetPo(b.poId);
                                     toast.success(
@@ -2443,13 +2402,45 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                     variant="outline"
                     size="sm"
                     onClick={() => {
+                      const currentTotalAllocated = splits.reduce((sum, s) => sum + num(s.qty), 0);
+                      const remainingKg = Math.max(0, round(splitRemaining - currentTotalAllocated));
                       const nextSize = isPieceBased ? pcKg : 0.5;
-                      const remainingKg = Math.max(0, unallocatedKg);
-                      const packsCount = nextSize > 0 ? Math.ceil(remainingKg / nextSize) : 0;
-                      setSplits((prev) => [
-                        ...prev,
-                        { size: nextSize, packs: packsCount, qty: remainingKg, poId: "" },
-                      ]);
+                      const packsCount = nextSize > 0 && remainingKg > 0 ? Math.ceil(remainingKg / nextSize) : (isPieceBased ? 1 : 25);
+                      const lineQty = remainingKg > 0 ? remainingKg : round(packsCount * nextSize);
+
+                      // Check if there's another unallocated pending buyer demand for this product
+                      const otherDemand = buyerAllocations.find(
+                        (b) =>
+                          b.product.toLowerCase() === splitProduct.toLowerCase() &&
+                          b.balanceKg > 0.001 &&
+                          !splits.some((s) => s.poId === b.poId)
+                      );
+
+                      if (otherDemand) {
+                        const oSize = otherDemand.packSizeKg > 0 ? otherDemand.packSizeKg : nextSize;
+                        const oPacks = otherDemand.balancePacks > 0 ? otherDemand.balancePacks : packsCount;
+                        setSplits((prev) => [
+                          ...prev,
+                          {
+                            size: oSize,
+                            packs: oPacks,
+                            qty: round(oPacks * oSize),
+                            poId: otherDemand.poId,
+                            buyer: otherDemand.buyer,
+                          },
+                        ]);
+                      } else {
+                        setSplits((prev) => [
+                          ...prev,
+                          {
+                            size: nextSize,
+                            packs: packsCount,
+                            qty: lineQty,
+                            poId: "",
+                            buyer: "",
+                          },
+                        ]);
+                      }
                     }}
                     className="w-full text-xs gap-1 border-dashed"
                   >
