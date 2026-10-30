@@ -451,9 +451,18 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
       ? demands.find((d) => d.poId === targetPoId) || demands[0]
       : demands[0];
 
+    const prodSpec =
+      PRODUCT_CATALOG.find((p) => p.name.toLowerCase() === product.toLowerCase()) ||
+      PRODUCT_CATALOG.find((p) => p.name.toLowerCase().includes(product.toLowerCase()));
+    const isPieceBased =
+      !!prodSpec?.defaultPackSize?.toLowerCase().includes("pc") ||
+      !!prodSpec?.defaultPackSize?.toLowerCase().includes("piece") ||
+      demands.some((d) => d.isPiece);
+    const pcKg = prodSpec?.packSizeKg || 1.0;
+
     if (top) {
       // Pre-fill top demand: target size × required packet count
-      const topSize = top.packSizeKg > 0 ? top.packSizeKg : 0.5;
+      const topSize = top.packSizeKg > 0 ? top.packSizeKg : isPieceBased ? pcKg : 0.5;
       const topPacks = top.balancePacks > 0 ? top.balancePacks : 25;
       const topQty = round(Math.min(remainingStock, topPacks * topSize));
       const actualPacks = topSize > 0 ? Math.ceil(topQty / topSize) : topPacks;
@@ -472,7 +481,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
       if (rem > 0) {
         const next = demands.find((d) => d.poId !== top.poId);
         if (next) {
-          const nextSize = next.packSizeKg > 0 ? next.packSizeKg : 0.5;
+          const nextSize = next.packSizeKg > 0 ? next.packSizeKg : isPieceBased ? pcKg : 0.5;
           const nextPacks = Math.min(next.balancePacks || 50, Math.ceil(rem / nextSize));
           const nextQty = round(Math.min(rem, nextPacks * nextSize));
           linesArr.push({
@@ -483,8 +492,8 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
             buyer: next.buyer,
           });
         } else {
-          const defSize = 0.5;
-          const defPacks = Math.ceil(rem / defSize);
+          const defSize = isPieceBased ? pcKg : 0.5;
+          const defPacks = defSize > 0 ? Math.ceil(rem / defSize) : 0;
           linesArr.push({
             size: defSize,
             packs: defPacks,
@@ -498,12 +507,12 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
       setSplits(linesArr);
       setSplitTargetPo(top.poId);
     } else {
-      // Default: 500 G (25 packs = 12.5 kg) + remainder in 1 KG
-      const defSize = 0.5;
-      const defPacks = Math.min(25, Math.max(1, Math.floor(remainingStock / defSize)));
+      // Default: Piece or Weight based
+      const defSize = isPieceBased ? pcKg : 0.5;
+      const defPacks = Math.max(1, Math.floor(remainingStock / defSize));
       const defQty = round(defPacks * defSize);
       const rem = Math.max(0, round(remainingStock - defQty));
-      const nextSize = 1.0;
+      const nextSize = isPieceBased ? pcKg : 1.0;
       const nextPacks = nextSize > 0 ? Math.ceil(rem / nextSize) : 0;
 
       setSplits([
@@ -548,8 +557,15 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
 
     // If stock still remains, add General Sales Stock
     if (runningRem > 0.001) {
-      const defSize = 0.5;
-      const defPacks = Math.ceil(runningRem / defSize);
+      const prodSpec =
+        PRODUCT_CATALOG.find((p) => p.name.toLowerCase() === splitProduct.toLowerCase()) ||
+        PRODUCT_CATALOG.find((p) => p.name.toLowerCase().includes(splitProduct.toLowerCase()));
+      const isPiece =
+        !!prodSpec?.defaultPackSize?.toLowerCase().includes("pc") ||
+        !!prodSpec?.defaultPackSize?.toLowerCase().includes("piece") ||
+        pendingDemands.some((d) => d.isPiece);
+      const defSize = isPiece ? prodSpec?.packSizeKg || 1.0 : 0.5;
+      const defPacks = defSize > 0 ? Math.ceil(runningRem / defSize) : 0;
       newSplits.push({
         size: defSize,
         packs: defPacks,
@@ -1907,32 +1923,6 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
       {splitProduct && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
           <div className="relative w-full max-w-2xl rounded-2xl border bg-card p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150 max-h-[92vh] overflow-y-auto">
-            {/* Modal Header */}
-            <div className="flex items-start justify-between border-b pb-3">
-              <div className="flex items-center gap-2.5">
-                <span className="text-3xl" role="img" aria-label={splitProduct}>
-                  {getProduceEmoji(splitProduct)}
-                </span>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-lg font-bold text-foreground">Package Split Allocator</h3>
-                    <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary">
-                      {splitSourceStage.stage} · {splitSourceStage.grade}
-                    </span>
-                  </div>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    Split <strong>{splitProduct}</strong> into buyer-specified <strong>Packet Counts</strong> & <strong>Pieces / Grams</strong> (Auto-computes Total Pieces & KG).
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setSplitProduct(null)}
-                className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
-              >
-                <X className="size-5" />
-              </button>
-            </div>
-
             {(() => {
               const splitProductSpec = splitProduct
                 ? PRODUCT_CATALOG.find((p) => p.name.toLowerCase() === splitProduct.toLowerCase()) ||
@@ -1947,6 +1937,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                 );
 
               const pcKg = splitProductSpec?.packSizeKg || 1.0;
+
               const piecePackOptions: BagSizeOption[] = isPieceBased
                 ? [
                     {
@@ -2018,6 +2009,35 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
 
               return (
                 <div className="space-y-4">
+                  {/* Modal Header */}
+                  <div className="flex items-start justify-between border-b pb-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-3xl" role="img" aria-label={splitProduct}>
+                        {getProduceEmoji(splitProduct)}
+                      </span>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-lg font-bold text-foreground">Package Split Allocator</h3>
+                          <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary">
+                            {splitSourceStage.stage} · {splitSourceStage.grade}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {isPieceBased ? (
+                            <>Allocate piece counts for <strong>{splitProduct}</strong> against buyer purchase orders.</>
+                          ) : (
+                            <>Split <strong>{splitProduct}</strong> into buyer-specified <strong>Packet Counts</strong> & <strong>Grams</strong> (Auto-computes Total KG).</>
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setSplitProduct(null)}
+                      className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+                    >
+                      <X className="size-5" />
+                    </button>
+                  </div>
                   {/* PENDING BUYER DEMANDS SECTION */}
                   {productBuyerDemands.length > 0 && (
                     <div className="rounded-xl border border-primary/30 bg-primary/5 p-3.5 space-y-3">
@@ -2095,9 +2115,10 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                                       },
                                     ];
                                     if (remKg > 0) {
+                                      const defaultSize = isPieceBased ? pcKg : 0.5;
                                       newSplits.push({
-                                        size: 0.5,
-                                        packs: Math.ceil(remKg / 0.5),
+                                        size: defaultSize,
+                                        packs: defaultSize > 0 ? Math.ceil(remKg / defaultSize) : 0,
                                         qty: remKg,
                                         poId: "",
                                         buyer: "",
