@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MODULES, seedRows, type Row, getPackSpecOptions, PRODUCT_CATALOG } from '@/lib/modules';
-import { bagBreakdown, buyerLocation, draftInvoiceForSalesOrder, invoiceForSalesOrder, marketTripDemand, normalize, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, validateData, warehouseFlowRows, parseLines, returnsAvailable, type Data } from '@/lib/workflow';
+import { bagBreakdown, buyerLocation, draftInvoiceForSalesOrder, invoiceForSalesOrder, marketTripDemand, normalize, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, validateData, warehouseFlowRows, parseLines, returnsAvailable, returnFromDelivery, type Data } from '@/lib/workflow';
 import { outstandingDemand } from '@/lib/sourcing';
 const demo=():Data=>Object.fromEntries(MODULES.map(m=>[m.slug,seedRows(m)]));
 const quantity=(data:Data,product:string,category:string)=>stock(data).find(s=>s.product===product&&s.category===category)?.qty||0;
@@ -346,6 +346,41 @@ describe('Integrated stock workflow',()=>{
    const sale=normalize('sales-orders',populate('sales-orders','po','PO-9201',{id:'SO-9201',status:'Draft',buyer:'FreshMart Retail'},d));
    expect(parseLines(sale['item']).map(line=>[line.p,line.q,line.packKg])).toEqual([['Drumsticks',40,0.5],['Sweet Corn (Cholam)',60,1]]);
    expect(sale['qty']).toBe(100);
+ });
+ it('turns delivery rejects into a linked buyer return that follows edits until received',()=>{
+   const d=demo();
+   const delivery=normalize('deliveries',{
+     ...populate('deliveries','dc','SDC-1004',{id:'DLV-9401',status:'QC issue',responsible:'Ravi Kumar'},d),
+   });
+   const withRejects={...delivery,item:JSON.stringify(parseLines(delivery['item']).map(line=>line.p==='Beans Broad (Avarakkaai)'?{...line,rejectKg:4,rejectBox:1}:line))};
+   const created=returnFromDelivery(withRejects,d,'RDC-9401');
+   expect(created).toMatchObject({id:'RDC-9401',delivery:'DLV-9401',sale:'SO-1004',salesDc:'SDC-1004',buyer:'FreshMart Retail',warehouse:'Pollachi Depot',qty:4,status:'Return DC created'});
+   expect(parseLines(created?.['item']).map(line=>[line.p,line.q,line.box])).toEqual([['Beans Broad (Avarakkaai)',4,1]]);
+   expect(validateData({...d,deliveries:[...(d['deliveries']||[]),withRejects],returns:[...(d['returns']||[]),created as Row]})).toBeNull();
+   expect(returnFromDelivery(delivery,d,'RDC-9402')).toBeUndefined();
+   const received={...d,returns:[...(d['returns']||[]),{...(created as Row),status:'Received'}]};
+   expect(returnFromDelivery(withRejects,received,'RDC-9403')).toBeNull();
+ });
+ it('loads sent KG, boxes and buyer QC rejects into a sales return',()=>{
+   const d=demo();
+   d['returns']=(d['returns']||[]).filter(x=>x['sale']!=='SO-1001');
+   const ret=normalize('returns',populate('returns','sale','SO-1001',{id:'RDC-9601',status:'Requested'},d));
+   expect(ret).toMatchObject({salesDc:'SDC-1001',delivery:'DLV-1001',buyer:'FreshMart Retail',qty:3,boxes:1});
+   expect(parseLines(ret['item']).map(l=>[l.p,l.sentQ,l.sentBox,l.rejectKg,l.rejectBox,l.q,l.box])).toEqual([['Tomato',23,5,3,1,3,1]]);
+   const tooMany={...ret,item:JSON.stringify(parseLines(ret['item']).map(l=>({...l,box:6})))};
+   expect(validateData({...d,returns:[...(d['returns']||[]),tooMany]})).toContain('returned boxes exceed the boxes sent');
+ });
+ it('fills delivery boxes sent from the Split Allocator box counts of the demand',()=>{
+   const d=demo();
+   d['packing']=[...(d['packing']||[]),
+     {id:'PK-9501',status:'In sales stock',po:'PO-9501',grade:'Grade A',item:JSON.stringify([{p:'Beetroot',q:200},{p:'Carrot',q:100}]),containerType:'Plastic crates',containerCount:12},
+     {id:'PK-9502',status:'In sales stock',po:'PO-9501',grade:'Grade A',item:JSON.stringify([{p:'Beetroot',q:100}]),containerType:'Gunny bags',containerCount:4},
+   ];
+   d['sales-orders']=[...(d['sales-orders']||[]),{id:'SO-9501',status:'Dispatched',po:'PO-9501',buyer:'Nilgiris Supermarket',item:JSON.stringify([{p:'Beetroot',q:300},{p:'Carrot',q:50}]),qty:350}];
+   d['dispatch']=[...(d['dispatch']||[]),{id:'SDC-9501',status:'Delivered',so:'SO-9501',buyer:'Nilgiris Supermarket',item:JSON.stringify([{p:'Beetroot',q:300},{p:'Carrot',q:50}]),qty:350}];
+   const delivery=populate('deliveries','dc','SDC-9501',{id:'DLV-9501',status:'Pending'},d);
+   // Beetroot: 8 of 12 crates + 4 bags; Carrot: 4 crates for 100 kg, half of it sent.
+   expect(parseLines(delivery['item']).map(line=>[line.p,line.box])).toEqual([['Beetroot',12],['Carrot',2]]);
  });
  it('derives buyer QC totals from per-product reject KG and box counts',()=>{
    const delivery=normalize('deliveries',{

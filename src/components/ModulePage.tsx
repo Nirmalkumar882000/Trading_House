@@ -30,7 +30,7 @@ import { cn } from "@/lib/utils";
 import { outstandingDemand } from "@/lib/sourcing";
 import { Button } from "./ui/button";
 import { EmployeeSelect } from "./EmployeeSelect";
-import { bagBreakdown, buyerLocation, buysFromTrip, draftInvoiceForSalesOrder, invoiceForSalesOrder, marketTripDemand, parseBuys, returnsAvailable, lines, normalize, num, parseLines, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, syncReceiptDownstream, total, validateData, round, type ProductLine } from "@/lib/workflow";
+import { bagBreakdown, buyerLocation, buysFromTrip, draftInvoiceForSalesOrder, invoiceForSalesOrder, marketTripDemand, parseBuys, returnsAvailable, returnFromDelivery, RETURN_OPEN_STATUSES, lines, normalize, num, parseLines, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, syncReceiptDownstream, total, validateData, round, type ProductLine } from "@/lib/workflow";
 export { parseLines } from "@/lib/workflow";
 
 function getCreateButtonLabel(slug: string, title: string): string {
@@ -288,18 +288,54 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
   );
 
   const save = (r: Row) => {
+    if (mod.slug === "returns") {
+      // Products the buyer kept (0 KG returned) are only reference rows in the editor.
+      const returned = parseLines(r["item"]).filter((line) => line.q > 0);
+      if (returned.length) r = { ...r, item: JSON.stringify(returned) };
+    }
     const full = normalize(mod.slug, { ...r, ...(mod.compute?.(r) ?? {}) } as Row);
     const previous = rows.find((x) => x.id === full.id);
     if (mod.slug === "supplier-prices" && full.status === "Confirmed" && previous?.status !== "Priced" && previous?.status !== "Confirmed") {
       toast.error("Save complete supplier pricing as Priced before confirming it.");
       return;
     }
+    if (mod.slug === "deliveries") return saveDelivery(full);
     const err = mod.validate?.(full) || validateData({ ...data, [mod.slug]: rows.some(x => x.id === full.id) ? rows.map(x => x.id === full.id ? full : x) : [...rows, full] });
     if (err) { toast.error(err); return; }
     const isNew = !rows.some((x) => x.id === full.id);
     upsert(mod.slug, full);
     setEditing(null);
     toast.success(`${full.id} ${isNew ? "created" : "updated"}`);
+  };
+
+  // Delivery rejects become a buyer return (Return DC) that later enters quarantine and Return QC.
+  const saveDelivery = (delivery: Row) => {
+    const returns = data["returns"] ?? [];
+    const linked = returns.find((entry) => entry["delivery"] === delivery.id);
+    const generated = returnFromDelivery(delivery, data, nextId("returns"));
+    const dropLinked = generated === undefined && linked && RETURN_OPEN_STATUSES.includes(linked.status);
+    const nextReturns = generated
+      ? returns.some((entry) => entry.id === generated.id) ? returns.map((entry) => entry.id === generated.id ? generated : entry) : [...returns, generated]
+      : dropLinked ? returns.filter((entry) => entry.id !== linked.id) : returns;
+    const saved = { ...delivery, returnRef: generated ? generated.id : dropLinked ? "" : String(delivery["returnRef"] || linked?.id || "") };
+    const err = validateData({
+      ...data,
+      deliveries: rows.some((x) => x.id === saved.id) ? rows.map((x) => x.id === saved.id ? saved : x) : [...rows, saved],
+      returns: nextReturns,
+    });
+    if (err) { toast.error(err); return; }
+    const isNew = !rows.some((x) => x.id === saved.id);
+    upsert("deliveries", saved);
+    if (generated) upsert("returns", generated);
+    if (dropLinked) remove("returns", linked.id);
+    setEditing(null);
+    if (generated) {
+      toast.success(`${saved.id} ${isNew ? "created" : "updated"} · ${generated.id} return DC ${linked ? "updated" : "created"} for ${num(generated["qty"])} kg rejected`);
+    } else if (generated === null) {
+      toast.success(`${saved.id} updated · ${linked?.id} is already ${linked?.status}, so its quantities were not changed`);
+    } else {
+      toast.success(`${saved.id} ${isNew ? "created" : "updated"}${dropLinked ? ` · ${linked.id} removed (no rejects)` : ""}`);
+    }
   };
 
   const advance = (r: Row) => {
@@ -676,8 +712,8 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                       {mod.slug === "invoices" && (
                         <Button
                           variant="ghost"
-                          title="View and print invoice"
-                          aria-label={`View invoice ${r.id}`}
+                          title="View and print proforma invoice"
+                          aria-label={`View proforma invoice ${r.id}`}
                           onClick={() => setInvoiceViewRow(r)}
                           className="rounded-md p-1.5 text-primary hover:bg-primary-soft"
                         >
@@ -1078,6 +1114,12 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                 <BuysEditor need={need} products={f.options ?? []} suppliers={(data["suppliers"] ?? []).filter((x) => x.status !== "Inactive" && x.status !== "Rejected").map((x) => String(x["name"] ?? "")).filter(Boolean)} value={live[f.key]} onChange={(v) => set(f.key, v)} priceEditable={priceEditable} />
               ) : f.type === "products" && mod.slug === "deliveries" ? (
                 <DeliveryRejectEditor value={live[f.key]} onChange={(v) => setForm((prev) => ({ ...prev, [f.key]: v }))} />
+              ) : f.type === "products" && mod.slug === "returns" ? (
+                <ReturnLinesEditor
+                  value={live[f.key]}
+                  others={(data["returns"] || []).filter((x) => x.id !== live.id && live["sale"] && x["sale"] === live["sale"])}
+                  onChange={(v) => setForm((prev) => ({ ...prev, [f.key]: v }))}
+                />
               ) : f.type === "products" && f.readOnly ? (
                 <div className="rounded-lg border bg-muted/40 p-3">
                   <ProductChips
@@ -2282,6 +2324,111 @@ function DeliveryRejectEditor({ value, onChange }: { value: unknown; onChange: (
           </tr>
         </tfoot>
       </table>
+    </div>
+  );
+}
+
+function ReturnLinesEditor({ value, others, onChange }: { value: unknown; others: Row[]; onChange: (v: string) => void }) {
+  const lines = parseLines(value);
+  if (!lines.length) {
+    return <div className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">Select the original sale to load the products sent and buyer QC rejects.</div>;
+  }
+  const patch = (p: string, change: Partial<ProductLine>) =>
+    onChange(JSON.stringify(lines.map((line) => (line.p === p ? { ...line, ...change } : line))));
+  const cell = "w-20 rounded-md border bg-background px-2 py-1 text-right text-xs tabular-nums outline-none focus:border-primary focus:ring-1 focus:ring-primary/20";
+  const show = (v: number | undefined) => (v === undefined ? "—" : String(round(v)));
+  const sum = (pick: (l: ProductLine) => number | undefined) => round(lines.reduce((s, l) => s + num(pick(l)), 0));
+  // KG/boxes of this product already on other returns for the same sale (e.g. the Return DC auto-created from delivery rejects).
+  const earlier = (p: string) => {
+    const hits = others
+      .map((x) => ({ id: x.id, status: x.status, line: parseLines(x["item"]).find((i) => i.p === p) }))
+      .filter((x) => x.line && x.line.q > 0);
+    return { q: round(hits.reduce((s, x) => s + num(x.line?.q), 0)), box: hits.reduce((s, x) => s + num(x.line?.box), 0), refs: hits };
+  };
+  const rows = lines.map((l) => ({ l, prev: earlier(l.p) }));
+  const pendingKg = round(rows.reduce((s, { l, prev }) => s + Math.max(0, num(l.rejectKg) - prev.q - l.q), 0));
+  const coveredRefs = [...new Set(rows.flatMap(({ prev }) => prev.refs.map((x) => `${x.id} (${x.status})`)))];
+  return (
+    <div className="space-y-2">
+      <div className="overflow-x-auto rounded-lg border">
+        <table className="w-full text-sm">
+          <thead className="bg-muted/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+            <tr>
+              <th className="px-3 py-2">Product</th>
+              <th className="px-3 py-2 text-right">Sent KG</th>
+              <th className="px-3 py-2 text-right">Boxes sent</th>
+              <th className="px-3 py-2 text-right">Buyer QC rejected</th>
+              <th className="px-3 py-2 text-right">Already returned</th>
+              <th className="px-3 py-2 text-right">Returned boxes</th>
+              <th className="px-3 py-2 text-right">Returned KG</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {rows.map(({ l, prev }) => {
+              const overKg = l.sentQ !== undefined && l.q + prev.q > l.sentQ + 0.001;
+              const overBox = num(l.sentBox) > 0 && num(l.box) + prev.box > num(l.sentBox);
+              const rejected = num(l.rejectKg) > 0 || num(l.rejectBox) > 0;
+              const openReject = Math.max(0, round(num(l.rejectKg) - prev.q));
+              const openBox = Math.max(0, num(l.rejectBox) - prev.box);
+              return (
+                <tr key={l.p} className={cn(l.q > 0 && "bg-amber-50/60 dark:bg-amber-500/5")}>
+                  <td className="px-3 py-2 font-medium">{l.p}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{show(l.sentQ)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{show(l.sentBox)}</td>
+                  <td className={cn("px-3 py-2 text-right tabular-nums", rejected ? "font-semibold text-destructive" : "text-muted-foreground")}>
+                    {l.rejectKg === undefined ? "—" : `${round(num(l.rejectKg))} kg · ${num(l.rejectBox)} box`}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    {prev.q > 0 ? (
+                      <div className="leading-tight">
+                        <span className="font-semibold">{prev.q} kg · {prev.box} box</span>
+                        <div className="text-[10px] text-muted-foreground">{prev.refs.map((x) => x.id).join(", ")}</div>
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <input aria-label={`${l.p} returned boxes`} type="number" min="0" step="1" className={cn(cell, overBox && "border-destructive text-destructive")} value={l.box ?? ""} placeholder="0"
+                      onChange={(e) => patch(l.p, { box: Math.max(0, Math.floor(Number(e.target.value) || 0)) })} />
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <input aria-label={`${l.p} returned KG`} type="number" min="0" step="any" className={cn(cell, overKg && "border-destructive text-destructive")} value={l.q || ""} placeholder="0"
+                      onChange={(e) => patch(l.p, { q: Math.max(0, Number(e.target.value) || 0) })} />
+                    {openReject > 0 && l.q === 0 && (
+                      <button type="button" className="mt-1 block w-full text-right text-[10px] font-semibold text-primary hover:underline"
+                        onClick={() => patch(l.p, { q: openReject, ...(openBox > 0 ? { box: openBox } : {}) })}>
+                        Use rejects ({openReject} kg)
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot className="border-t bg-muted/40 text-xs font-semibold">
+            <tr>
+              <td className="px-3 py-2">{lines.filter((l) => l.q > 0).length} of {lines.length} products returned</td>
+              <td className="px-3 py-2 text-right tabular-nums">{sum((l) => l.sentQ)} kg</td>
+              <td className="px-3 py-2 text-right tabular-nums">{sum((l) => l.sentBox)}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-destructive">{sum((l) => l.rejectKg)} kg · {sum((l) => l.rejectBox)} box</td>
+              <td className="px-3 py-2 text-right tabular-nums">{round(rows.reduce((s, r) => s + r.prev.q, 0))} kg · {rows.reduce((s, r) => s + r.prev.box, 0)} box</td>
+              <td className="px-3 py-2 text-right tabular-nums">{sum((l) => l.box)}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-amber-700 dark:text-amber-400">{sum((l) => l.q)} kg</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      {coveredRefs.length > 0 && (
+        <p className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300">
+          Buyer QC rejects for this sale are already on {coveredRefs.join(", ")}. Open that return to receive it, or enter any extra KG the buyer is sending back here.
+        </p>
+      )}
+      {pendingKg > 0 && (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+          {pendingKg} kg of buyer QC rejects is not on any return yet.
+        </p>
+      )}
     </div>
   );
 }

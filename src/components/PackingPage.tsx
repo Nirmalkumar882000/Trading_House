@@ -1802,6 +1802,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                     "Total KG",
                     "Packet Size",
                     "Packets Created",
+                    "Container / Boxes",
                     "Packer(s)",
                     "Status",
                     "Actions",
@@ -1853,6 +1854,30 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                         )}
                       </td>
                       <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            aria-label={`Container type for ${r.id}`}
+                            value={String(r["containerType"] || OUTWARD_CONTAINER_TYPES[0])}
+                            onChange={(e) => upsert("packing", { ...r, containerType: e.target.value })}
+                            className="h-7 rounded-md border bg-background px-1.5 text-xs"
+                          >
+                            {OUTWARD_CONTAINER_TYPES.map((t) => (
+                              <option key={t} value={t}>{t}</option>
+                            ))}
+                          </select>
+                          <input
+                            type="number"
+                            min={0}
+                            aria-label={`Box count for ${r.id}`}
+                            value={num(r["containerCount"]) || ""}
+                            placeholder="0"
+                            onChange={(e) => upsert("packing", { ...r, containerCount: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
+                            className={`h-7 w-16 rounded-md border px-1.5 text-right text-xs font-bold tabular-nums ${num(r["containerCount"]) > 0 ? "bg-background" : "border-amber-400 bg-amber-50 dark:bg-amber-500/10"}`}
+                          />
+                          <span className="text-xs text-muted-foreground">box</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-1 max-w-xs">
                           {String(r["packer"] || "—")
                             .split(",")
@@ -1900,7 +1925,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                 })}
                 {!filteredPackRows.length && (
                   <tr>
-                    <td colSpan={9} className="px-4 py-8 text-center text-xs text-muted-foreground">
+                    <td colSpan={10} className="px-4 py-8 text-center text-xs text-muted-foreground">
                       No packed batches found for {tab.label}.
                     </td>
                   </tr>

@@ -126,10 +126,10 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
   returns:{
     title:'Sales returns & quarantine',
     description:'Returns stay in inspection quarantine until their quality check approves a saleable grade.',
-    fields:[date,ref('sale','Original sale'),{key:'salesDc',label:'Original Sales DC',readOnly:true,list:true},{key:'buyer',label:'Buyer',readOnly:true,list:true},products,number('qty','Returned KG',true),{key:'reason',label:'Return reason',type:'select',options:['Quality issue','Excess supply','Wrong item'],required:true,list:true},person],
+    fields:[date,ref('sale','Original sale'),{key:'salesDc',label:'Original Sales DC',readOnly:true,list:true},{key:'buyer',label:'Buyer',readOnly:true,list:true},{...products,label:'Products · sent, rejected & returned'},number('qty','Returned KG',true),{key:'boxes',label:'Returned boxes',type:'number',readOnly:true,list:true},{key:'reason',label:'Return reason',type:'select',options:['Quality issue','Excess supply','Wrong item'],required:true,list:true},person],
     seed:[
-      {...common,sale:'SO-1001',salesDc:'SDC-1001',buyer:'FreshMart Retail',warehouse:'Main Warehouse (Udumalaipet)',item:item('Tomato',3),qty:3,reason:'Quality issue',status:'Received'},
-      {date:'2026-10-24',responsible:'Priya S',sale:'SO-1002',salesDc:'SDC-1002',buyer:'Nilgiris Supermarket',warehouse:'Pollachi Depot',item:item('Potato',2),qty:2,reason:'Excess supply',status:'Return DC created'}
+      {...common,delivery:'DLV-1001',sale:'SO-1001',salesDc:'SDC-1001',buyer:'FreshMart Retail',warehouse:'Main Warehouse (Udumalaipet)',item:JSON.stringify([{p:'Tomato',q:3,box:1,sentQ:23,sentBox:5,rejectKg:3,rejectBox:1}]),qty:3,boxes:1,reason:'Quality issue',status:'Received'},
+      {date:'2026-10-24',responsible:'Priya S',sale:'SO-1002',salesDc:'SDC-1002',buyer:'Nilgiris Supermarket',warehouse:'Pollachi Depot',item:JSON.stringify([{p:'Potato',q:2,box:1,sentQ:100,sentBox:10,rejectKg:0,rejectBox:0}]),qty:2,boxes:1,reason:'Excess supply',status:'Return DC created'}
     ]
   },
   dispatch:{
@@ -145,9 +145,9 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
   },
   deliveries:{
     description:'Record buyer acceptance with an individual reject KG and box count for every product sent on an outward Sales DC.',
-    fields:[{key:'dc',label:'Sales DC',type:'select',required:true,list:true},{key:'buyer',label:'Buyer',type:'text',readOnly:true,list:true},{key:'item',label:'Products sent · boxes & rejects',type:'products',readOnly:true,list:true},{key:'accepted',label:'Accepted qty',type:'number',readOnly:true,list:true,suffix:'kg'},{key:'issueQty',label:'Rejected qty',type:'number',readOnly:true,list:true,suffix:'kg'},{key:'boxes',label:'Boxes sent',type:'number',readOnly:true,list:true},{key:'rejectBoxes',label:'Rejected boxes',type:'number',readOnly:true,list:true},{key:'remarks',label:'Remarks',type:'textarea'},person],
+    fields:[{key:'dc',label:'Sales DC',type:'select',required:true,list:true},{key:'buyer',label:'Buyer',type:'text',readOnly:true,list:true},{key:'item',label:'Products sent · boxes & rejects',type:'products',readOnly:true,list:true},{key:'accepted',label:'Accepted qty',type:'number',readOnly:true,list:true,suffix:'kg'},{key:'issueQty',label:'Rejected qty',type:'number',readOnly:true,list:true,suffix:'kg'},{key:'boxes',label:'Boxes sent',type:'number',readOnly:true,list:true},{key:'rejectBoxes',label:'Rejected boxes',type:'number',readOnly:true,list:true},{key:'returnRef',label:'Buyer return (Return DC)',readOnly:true,list:true},{key:'remarks',label:'Remarks',type:'textarea'},person],
     seed:[
-      {dc:'SDC-1001',buyer:'FreshMart Retail',item:JSON.stringify([{p:'Tomato',q:23,box:5,rejectKg:3,rejectBox:1}]),remarks:'3 kg soft/damaged in transit',status:'Signed'},
+      {dc:'SDC-1001',returnRef:'RDC-1001',buyer:'FreshMart Retail',item:JSON.stringify([{p:'Tomato',q:23,box:5,rejectKg:3,rejectBox:1}]),remarks:'3 kg soft/damaged in transit',status:'Signed'},
       {dc:'SDC-1002',buyer:'Nilgiris Supermarket',item:JSON.stringify([{p:'Potato',q:100,box:10,rejectKg:0,rejectBox:0}]),remarks:'Delivered in full, grade verified',status:'Signed'},
     ]
   },

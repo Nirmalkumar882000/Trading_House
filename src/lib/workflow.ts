@@ -1,7 +1,7 @@
 import type { Row } from './modules';
 import { WAREHOUSES, DEFAULT_WAREHOUSE } from './modules';
 export type Data = Record<string, Row[]>;
-export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; saleRate?: number; sellingPrice?: number; packKg?: number; packLabel?: string; containerType?: string; containerCount?: number; extraKg?: number; reason?: string; sentQ?: number; grader?: string; lineTag?: string; startTime?: string; box?: number; rejectKg?: number; rejectBox?: number };
+export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; saleRate?: number; sellingPrice?: number; packKg?: number; packLabel?: string; containerType?: string; containerCount?: number; extraKg?: number; reason?: string; sentQ?: number; grader?: string; lineTag?: string; startTime?: string; box?: number; rejectKg?: number; rejectBox?: number; sentBox?: number };
 export const num = (v: unknown) => Number(v) || 0;
 export const round = (v: number) => Math.round(v * 1000) / 1000;
 export function parseLines(v: unknown): ProductLine[] {
@@ -29,6 +29,7 @@ export function parseLines(v: unknown): ProductLine[] {
         ...(l.box !== undefined ? { box: num(l.box) } : {}),
         ...(l.rejectKg !== undefined ? { rejectKg: num(l.rejectKg) } : {}),
         ...(l.rejectBox !== undefined ? { rejectBox: num(l.rejectBox) } : {}),
+        ...(l.sentBox !== undefined ? { sentBox: num(l.sentBox) } : {}),
       }));
     }
   } catch { /* legacy product names */ }
@@ -363,6 +364,39 @@ export function supplierSellingPriceForProduct(product: string, trips: Row[], sa
     .sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
   return num(matchingPrices[0]?.line?.sellingPrice);
 }
+/** Sold KG, boxes sent and buyer QC rejects carried on a return line for reference. */
+function returnLineContext(sent: ProductLine): ProductLine {
+  return { p: sent.p, q: 0, sentQ: sent.q, sentBox: num(sent.box), rejectKg: num(sent.rejectKg), rejectBox: num(sent.rejectBox) };
+}
+// Returns that have not physically come back yet can still follow edits to the delivery rejects.
+export const RETURN_OPEN_STATUSES = ['Requested', 'Return DC created'];
+/**
+ * Buyer return generated from a delivery's per-product rejects.
+ * `undefined` = no rejects; `null` = linked return was already received, leave it untouched.
+ */
+export function returnFromDelivery(delivery: Row, data: Data, newId: string): Row | null | undefined {
+  const existing = (data['returns'] || []).find(entry => entry['delivery'] === delivery.id);
+  if (existing && !RETURN_OPEN_STATUSES.includes(existing.status)) return null;
+  const rejected = parseLines(delivery['item'])
+    .filter(line => num(line.rejectKg) > 0)
+    .map(line => ({ ...returnLineContext(line), q: num(line.rejectKg), ...(num(line.rejectBox) > 0 ? { box: num(line.rejectBox) } : {}) }));
+  if (!rejected.length) return undefined;
+  const dispatch = (data['dispatch'] || []).find(entry => entry.id === delivery['dc']);
+  return normalize('returns', {
+    ...existing,
+    id: existing?.id || newId,
+    date: String(delivery['date'] || existing?.['date'] || new Date().toISOString().slice(0, 10)),
+    responsible: String(delivery['responsible'] || existing?.['responsible'] || ''),
+    delivery: delivery.id,
+    sale: String(dispatch?.['so'] || existing?.['sale'] || ''),
+    salesDc: String(delivery['dc'] || ''),
+    buyer: String(delivery['buyer'] || dispatch?.['buyer'] || ''),
+    warehouse: String(dispatch?.['warehouse'] || existing?.['warehouse'] || DEFAULT_WAREHOUSE),
+    item: JSON.stringify(rejected),
+    reason: String(existing?.['reason'] || 'Quality issue'),
+    status: existing?.status || 'Return DC created',
+  });
+}
 export function invoiceForSalesOrder(salesOrderId: string, dispatches: Row[], invoices: Row[]): Row | undefined {
   return invoices.find(invoice => {
     if (invoice['so'] === salesOrderId || invoice['salesOrder'] === salesOrderId) return true;
@@ -483,6 +517,7 @@ export function normalize(slug: string, r: Row): Row {
       full['status'] = 'With us';
     }
   }
+  if (slug === 'returns' && ls.length) full['boxes'] = ls.reduce((s, l) => s + num(l.box), 0);
   if (slug === 'deliveries' && ls.some(l => l.rejectKg !== undefined)) {
     // Buyer QC totals are derived from the per-product reject capture.
     const rejected = round(ls.reduce((s, l) => s + num(l.rejectKg), 0));
@@ -623,6 +658,22 @@ export function referenceModule(slug: string, key: string, r: Row) {
   if (slug === 'quality-check' && key === 'lot' && r['sourceType'] === 'Return') return 'returns';
   return references[slug]?.[key];
 }
+/** Boxes packed for a product against a buyer demand (Split Allocator box counts), scaled to the KG sent. */
+export function packedBoxesFor(data: Data, po: unknown, product: string, sentKg: number): number {
+  if (!po) return 0;
+  let kg = 0; let boxes = 0;
+  for (const row of data['packing'] || []) {
+    if (row['po'] !== po || row['grade'] === 'Rejected') continue;
+    const rowLines = parseLines(row['item']);
+    const line = rowLines.find(l => l.p === product);
+    if (!line || line.q <= 0) continue;
+    const rowKg = total(rowLines);
+    kg += line.q;
+    boxes += num(row['containerCount']) * (rowKg > 0 ? line.q / rowKg : 1);
+  }
+  if (kg <= 0 || boxes <= 0) return 0;
+  return Math.ceil(boxes * Math.min(1, sentKg / kg) - 1e-9);
+}
 export function populate(slug: string, key: string, value: string, form: Row, data: Data): Row {
   const target = referenceModule(slug,key,form); const ref = (data[target || ''] || []).find(r=>r.id===value || r['name']===value);
   let r: Row = { ...form,[key]:value }; if (!ref) return r;
@@ -739,7 +790,18 @@ export function populate(slug: string, key: string, value: string, form: Row, da
   }
   if (slug === 'returns') {
     const dispatch = (data['dispatch'] || []).find(entry => entry['so'] === ref.id);
-    r={...r,salesDc:dispatch?.id || '',buyer:ref['buyer'] || '',item:JSON.stringify(lines(ref).map(l=>({...l,q:0})))};
+    const delivery = dispatch ? (data['deliveries'] || []).find(entry => entry['dc'] === dispatch.id) : undefined;
+    const deliveredLines = parseLines(delivery?.['item']);
+    const others = (data['returns'] || []).filter(x => x.id !== form.id && x['sale'] === ref.id);
+    const ls = lines(ref).map(l => {
+      const sent = deliveredLines.find(d => d.p === l.p) || { ...l, box: packedBoxesFor(data, ref['po'], l.p, l.q) };
+      const ctx = returnLineContext(sent);
+      // Default the returned KG/boxes to the buyer QC rejects not yet covered by another return.
+      const already = others.reduce((s, x) => s + (lines(x).find(i => i.p === l.p)?.q || 0), 0);
+      const q = Math.max(0, round(num(ctx.rejectKg) - already));
+      return { ...ctx, q, ...(q > 0 && num(ctx.rejectBox) > 0 ? { box: num(ctx.rejectBox) } : {}) };
+    });
+    r={...r,salesDc:dispatch?.id || '',...(delivery ? { delivery: delivery.id } : {}),buyer:ref['buyer'] || '',item:JSON.stringify(ls)};
   }
   if (slug === 'dispatch') {
     const buyers = data['buyers'] || [];
@@ -783,7 +845,7 @@ export function populate(slug: string, key: string, value: string, form: Row, da
       ...r,
       buyer:ref['buyer'] || sale?.['buyer'] || '',
       item: sentLines.length
-        ? JSON.stringify(sentLines.map(line => ({ ...line, box: num(line.box ?? line.containerCount) || singleLineBoxes, rejectKg: 0, rejectBox: 0 })))
+        ? JSON.stringify(sentLines.map(line => ({ ...line, box: num(line.box ?? line.containerCount) || packedBoxesFor(data, sale?.['po'], line.p, line.q) || singleLineBoxes, rejectKg: 0, rejectBox: 0 })))
         : item,
       accepted:dispatchedQty,
       issueQty:0,
@@ -927,6 +989,7 @@ export function validateData(data: Data): string | null {
       if (slug==='returns') {
         const sale=(data['sales-orders'] || []).find(x=>x.id===r['sale']); if (!sale || (!activeSale(sale) && !hasSalesDispatch(sale.id,data))) return 'Returns require an original dispatched sale.';
         if (r['salesDc'] && !(data['dispatch'] || []).some(dispatch => dispatch.id === r['salesDc'] && dispatch['so'] === sale.id)) return 'Select the Sales DC linked to the original sale.';
+        for (const l of ls) if (num(l.box) < 0 || (num(l.sentBox) > 0 && num(l.box) > num(l.sentBox))) return `${l.p}: returned boxes exceed the boxes sent.`;
         for (const l of ls) { const returned=(data['returns'] || []).filter(x=>x.id!==r.id && x['sale']===r['sale']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0) + l.q; if (returned>(lines(sale).find(x=>x.p===l.p)?.q || 0)+0.001) return `${l.p}: returned quantity exceeds original sale.`; }
       }
       if (slug==='dispatch' || slug==='transport') {

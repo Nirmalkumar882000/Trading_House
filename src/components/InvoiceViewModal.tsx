@@ -22,20 +22,20 @@ export function InvoiceViewModal({ invoice, onClose }: { invoice: Row; onClose: 
           .invoice-document { width: 100% !important; max-width: none !important; border: 0 !important; box-shadow: none !important; }
         }
       `}</style>
-      <section role="dialog" aria-modal="true" aria-label={`Invoice ${invoice.id}`} className="w-full max-w-3xl overflow-hidden rounded-2xl bg-card shadow-2xl">
+      <section role="dialog" aria-modal="true" aria-label={`Proforma Invoice ${invoice.id}`} className="w-full max-w-3xl overflow-hidden rounded-2xl bg-card shadow-2xl">
         <header className="invoice-print-controls flex items-center justify-between border-b bg-hero px-5 py-4 text-primary-foreground">
           <div className="flex items-center gap-2">
             <FileText className="size-5" />
             <div>
-              <h2 className="font-semibold">Invoice {invoice.id}</h2>
-              <p className="text-xs opacity-80">View or print this sales invoice</p>
+              <h2 className="font-semibold">Proforma Invoice {invoice.id}</h2>
+              <p className="text-xs opacity-80">View or print this proforma invoice</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
             <Button type="button" variant="outline" size="sm" onClick={() => window.print()} className="text-foreground">
               <Printer className="mr-1.5 size-4" /> Print
             </Button>
-            <Button type="button" variant="ghost" size="icon" onClick={onClose} aria-label="Close invoice">
+            <Button type="button" variant="ghost" size="icon" onClick={onClose} aria-label="Close proforma invoice">
               <X className="size-4" />
             </Button>
           </div>
@@ -45,8 +45,8 @@ export function InvoiceViewModal({ invoice, onClose }: { invoice: Row; onClose: 
             <div className="flex flex-wrap items-start justify-between gap-4 border-b-2 border-emerald-700 pb-5">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.18em] text-emerald-800">Velaan Bay Trading House</p>
-                <h1 className="mt-1 text-2xl font-bold">Sales Invoice</h1>
-                <p className="mt-1 text-xs text-zinc-500">Tax invoice · Product sales</p>
+                <h1 className="mt-1 text-2xl font-bold">Proforma Invoice</h1>
+                <p className="mt-1 text-xs text-zinc-500">Proforma invoice · Product sales</p>
               </div>
               <div className="text-right text-sm">
                 <p className="font-mono text-lg font-bold">{invoice.id}</p>
@@ -89,7 +89,7 @@ export function InvoiceViewModal({ invoice, onClose }: { invoice: Row; onClose: 
                   );
                 })}
                 {!lines.length && (
-                  <tr><td colSpan={4} className="py-6 text-center text-zinc-500">No product lines saved on this invoice.</td></tr>
+                  <tr><td colSpan={4} className="py-6 text-center text-zinc-500">No product lines saved on this proforma invoice.</td></tr>
                 )}
               </tbody>
             </table>
@@ -97,7 +97,7 @@ export function InvoiceViewModal({ invoice, onClose }: { invoice: Row; onClose: 
             <div className="ml-auto mt-5 w-full max-w-xs space-y-2 text-sm">
               <div className="flex justify-between"><span>Taxable amount</span><span>{fmtMoney(taxable)}</span></div>
               <div className="flex justify-between"><span>GST ({gstRate}%)</span><span>{fmtMoney(taxAmount)}</span></div>
-              <div className="flex justify-between border-t border-zinc-300 pt-2 text-base font-bold"><span>Invoice total</span><span>{fmtMoney(total)}</span></div>
+              <div className="flex justify-between border-t border-zinc-300 pt-2 text-base font-bold"><span>Proforma total</span><span>{fmtMoney(total)}</span></div>
               <div className="flex justify-between text-zinc-600"><span>Received</span><span>{fmtMoney(paid)}</span></div>
               <div className="flex justify-between font-semibold"><span>Balance due</span><span>{fmtMoney(Math.max(0, total - paid))}</span></div>
             </div>
