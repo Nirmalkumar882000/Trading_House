@@ -1,7 +1,7 @@
 import type { Row } from './modules';
 import { WAREHOUSES, DEFAULT_WAREHOUSE } from './modules';
 export type Data = Record<string, Row[]>;
-export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; saleRate?: number; sellingPrice?: number; packKg?: number; packLabel?: string; containerType?: string; containerCount?: number; extraKg?: number; reason?: string; sentQ?: number; grader?: string; lineTag?: string; startTime?: string; box?: number };
+export type ProductLine = { p: string; q: number; a?: number; a2?: number; b?: number; ret?: number; r?: number; saleRate?: number; sellingPrice?: number; packKg?: number; packLabel?: string; containerType?: string; containerCount?: number; extraKg?: number; reason?: string; sentQ?: number; grader?: string; lineTag?: string; startTime?: string; box?: number; rejectKg?: number; rejectBox?: number };
 export const num = (v: unknown) => Number(v) || 0;
 export const round = (v: number) => Math.round(v * 1000) / 1000;
 export function parseLines(v: unknown): ProductLine[] {
@@ -27,6 +27,8 @@ export function parseLines(v: unknown): ProductLine[] {
         ...(l.lineTag !== undefined ? { lineTag: String(l.lineTag) } : {}),
         ...(l.startTime !== undefined ? { startTime: String(l.startTime) } : {}),
         ...(l.box !== undefined ? { box: num(l.box) } : {}),
+        ...(l.rejectKg !== undefined ? { rejectKg: num(l.rejectKg) } : {}),
+        ...(l.rejectBox !== undefined ? { rejectBox: num(l.rejectBox) } : {}),
       }));
     }
   } catch { /* legacy product names */ }
@@ -268,8 +270,10 @@ export function packsText(packs: PackLine[], ls: ProductLine[]) {
 export function returnsAvailable(data: Data, product: string, excludeId = ''): number {
   const returned = (data['returns'] || []).filter(x=>['Received','Sent to QC'].includes(x.status)).reduce((s,x)=>s+(lines(x).find(l=>l.p===product)?.q || 0),0);
   const qualityChecks = (data['quality-check'] || []).filter(x=>x.id!==excludeId);
-  const usedInPurchaseQc = qualityChecks.filter(x=>x['sourceType']!=='Return' && x.status==='Stage 2 done').reduce((s,x)=>s+num(lines(x,'input').find(l=>l.p===product)?.ret),0);
-  const assignedToReturnQc = qualityChecks.filter(x=>x['sourceType']==='Return').reduce((s,x)=>s+num(lines(x,'input').find(l=>l.p===product)?.q),0);
+  // Sum every line of the product: Stage 1 can split one product into several grader lines.
+  const productLines = (x: Row) => lines(x,'input').filter(l=>l.p===product);
+  const usedInPurchaseQc = qualityChecks.filter(x=>x['sourceType']!=='Return' && x.status==='Stage 2 done').reduce((s,x)=>s+productLines(x).reduce((t,l)=>t+num(l.ret),0),0);
+  const assignedToReturnQc = qualityChecks.filter(x=>x['sourceType']==='Return').reduce((s,x)=>s+productLines(x).reduce((t,l)=>t+l.q,0),0);
   const used = usedInPurchaseQc + assignedToReturnQc;
   return Math.max(0, round(returned - used));
 }
@@ -479,6 +483,14 @@ export function normalize(slug: string, r: Row): Row {
       full['status'] = 'With us';
     }
   }
+  if (slug === 'deliveries' && ls.some(l => l.rejectKg !== undefined)) {
+    // Buyer QC totals are derived from the per-product reject capture.
+    const rejected = round(ls.reduce((s, l) => s + num(l.rejectKg), 0));
+    full['issueQty'] = rejected;
+    full['accepted'] = Math.max(0, round(qty - rejected));
+    full['boxes'] = ls.reduce((s, l) => s + num(l.box), 0);
+    full['rejectBoxes'] = ls.reduce((s, l) => s + num(l.rejectBox), 0);
+  }
   return full;
 }
 
@@ -631,7 +643,7 @@ export function populate(slug: string, key: string, value: string, form: Row, da
     const previousLines = parseLines(form['item']);
     const itemLines = sourceLines.map(line => {
       const previous = previousLines.find(existing => existing.p === line.p);
-      return { ...line, r: previous?.r ?? line.r ?? 0 };
+      return { ...line, r: previous?.r ?? line.r ?? 0, ...(previous?.sellingPrice !== undefined ? { sellingPrice: previous.sellingPrice } : {}) };
     });
     const selectedSuppliers = [...new Set(matchingBuys.map(b => b.s).filter(Boolean))];
     return normalize('supplier-prices', {
@@ -679,7 +691,12 @@ export function populate(slug: string, key: string, value: string, form: Row, da
   }
   if (slug === 'quality-check') {
     const used = (data['quality-check'] || []).filter(x=>x.id!==form.id && x['lot']===value && x['sourceType']===form['sourceType']);
-    const ls = lines(ref, target==='receipts'?'received':'qty').map(l=>({p:l.p,q:Math.max(0,round(l.q-used.reduce((s,x)=>s+(lines(x,'input').filter(i=>i.p===l.p).reduce((acc, i) => acc + i.q, 0)),0))),a:0,a2:0,b:0,ret:0})).filter(l=>l.q>0);
+    const ls = lines(ref, target==='receipts'?'received':'qty').map(l=>{
+      const lotLeft = Math.max(0,round(l.q-used.reduce((s,x)=>s+(lines(x,'input').filter(i=>i.p===l.p).reduce((acc, i) => acc + i.q, 0)),0)));
+      // Returns already pulled into a purchase Stage 2 pool have left quarantine, so cap at what is still there.
+      const q = target === 'returns' ? Math.min(lotLeft, returnsAvailable(data, l.p, form.id)) : lotLeft;
+      return {p:l.p,q,a:0,a2:0,b:0,ret:0};
+    }).filter(l=>l.q>0);
     r = {
       ...r,
       warehouse: ref['warehouse'] || r['warehouse'] || DEFAULT_WAREHOUSE,
@@ -700,7 +717,8 @@ export function populate(slug: string, key: string, value: string, form: Row, da
       const saleRate = num(existing?.saleRate) > 0
         ? num(existing?.saleRate)
         : supplierSellingPriceForProduct(l.p, trips, savedPrices);
-      return { ...l, p:l.p, q:Math.max(0,Math.min(open,avail)), saleRate };
+      // Cap to packed stock when some is packed; otherwise start from the open demand so KG, packets and value are visible.
+      return { ...l, p:l.p, q:Math.max(0,avail > 0 ? Math.min(open,avail) : open), saleRate };
     });
     const used = (p:string,size:number) => sold.reduce((t,x)=>t+(parsePacks(x['packs']).filter(k=>k.p===p&&k.size===size).reduce((a,k)=>a+k.bags+(k.loose>0?1:0),0)),0);
     const packs: PackLine[] = [];
@@ -758,10 +776,15 @@ export function populate(slug: string, key: string, value: string, form: Row, da
     const sale = (data['sales-orders'] || []).find(entry => entry.id === ref['so']);
     const item = ref['item'] || sale?.['item'] || '[]';
     const dispatchedQty = num(ref['qty']) || num(sale?.['qty']) || total(parseLines(item));
+    const sentLines = parseLines(item);
+    // A single-product DC can take its box count from the dispatch container count.
+    const singleLineBoxes = sentLines.length === 1 ? num(ref['containerCount']) : 0;
     r={
       ...r,
       buyer:ref['buyer'] || sale?.['buyer'] || '',
-      item,
+      item: sentLines.length
+        ? JSON.stringify(sentLines.map(line => ({ ...line, box: num(line.box ?? line.containerCount) || singleLineBoxes, rejectKg: 0, rejectBox: 0 })))
+        : item,
       accepted:dispatchedQty,
       issueQty:0,
     };
@@ -933,6 +956,11 @@ export function validateData(data: Data): string | null {
         const accepted = num(r['accepted']);
         const issues = num(r['issueQty']);
         if (accepted < 0 || issues < 0) return `${r.id}: accepted and issue quantities cannot be negative.`;
+        for (const line of parseLines(r['item'])) {
+          if (num(line.rejectKg) < 0 || num(line.rejectBox) < 0 || num(line.box) < 0) return `${r.id}: ${line.p} box and reject counts cannot be negative.`;
+          if (num(line.rejectKg) > line.q + 0.001) return `${r.id}: ${line.p} rejected KG exceeds the quantity sent.`;
+          if (num(line.box) > 0 && num(line.rejectBox) > num(line.box)) return `${r.id}: ${line.p} rejected boxes exceed the boxes sent.`;
+        }
         if (accepted + issues > num(dispatch['qty']) + 0.001) {
           return `${r.id}: accepted and issue quantities exceed the dispatched quantity.`;
         }

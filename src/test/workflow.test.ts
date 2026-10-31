@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MODULES, seedRows, type Row, getPackSpecOptions, PRODUCT_CATALOG } from '@/lib/modules';
-import { bagBreakdown, buyerLocation, draftInvoiceForSalesOrder, invoiceForSalesOrder, marketTripDemand, normalize, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, validateData, warehouseFlowRows, parseLines, type Data } from '@/lib/workflow';
+import { bagBreakdown, buyerLocation, draftInvoiceForSalesOrder, invoiceForSalesOrder, marketTripDemand, normalize, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, validateData, warehouseFlowRows, parseLines, returnsAvailable, type Data } from '@/lib/workflow';
 import { outstandingDemand } from '@/lib/sourcing';
 const demo=():Data=>Object.fromEntries(MODULES.map(m=>[m.slug,seedRows(m)]));
 const quantity=(data:Data,product:string,category:string)=>stock(data).find(s=>s.product===product&&s.category===category)?.qty||0;
@@ -326,6 +326,45 @@ describe('Integrated stock workflow',()=>{
      id:'DLV-9002',status:'Pending',dc:'SDC-9001',buyer:'FreshMart Retail',accepted:10,issueQty:0,
    }];
    expect(validateData(d)).toMatch(/already exists for this Sales DC/);
+ });
+ it('counts buyer returns used by every split line of a product',()=>{
+   const d=demo();
+   d['returns']=[{id:'RDC-9301',status:'Received',sale:'SO-1001',buyer:'FreshMart Retail',item:JSON.stringify([{p:'Tomato',q:15}]),qty:15,reason:'Quality issue'}];
+   expect(returnsAvailable(d,'Tomato')).toBe(15);
+   d['quality-check']=[...(d['quality-check']||[]),{
+     id:'QC-9301',status:'Stage 2 done',sourceType:'Purchase',lot:'GRN-1001',
+     item:JSON.stringify([{p:'Tomato',q:10,a:8,ret:6,lineTag:'Line 1/2'},{p:'Tomato',q:10,a:8,ret:5,lineTag:'Line 2/2'}]),
+   }];
+   expect(returnsAvailable(d,'Tomato')).toBe(4);
+   expect(returnsAvailable(d,'Tomato','QC-9301')).toBe(15);
+   const directInspection=populate('quality-check','lot','RDC-9301',{id:'QC-9302',status:'Assigned',sourceType:'Return'},d);
+   expect(parseLines(directInspection['item']).map(line=>[line.p,line.q])).toEqual([['Tomato',4]]);
+ });
+ it('defaults sales order KG to open demand when nothing is packed yet',()=>{
+   const d=demo();
+   d['purchase-orders']=[...(d['purchase-orders']||[]),{id:'PO-9201',status:'Accepted',buyer:'FreshMart Retail',item:JSON.stringify([{p:'Drumsticks',q:40,packKg:0.5},{p:'Sweet Corn (Cholam)',q:60,packKg:1}]),qty:100}];
+   const sale=normalize('sales-orders',populate('sales-orders','po','PO-9201',{id:'SO-9201',status:'Draft',buyer:'FreshMart Retail'},d));
+   expect(parseLines(sale['item']).map(line=>[line.p,line.q,line.packKg])).toEqual([['Drumsticks',40,0.5],['Sweet Corn (Cholam)',60,1]]);
+   expect(sale['qty']).toBe(100);
+ });
+ it('derives buyer QC totals from per-product reject KG and box counts',()=>{
+   const delivery=normalize('deliveries',{
+     id:'DLV-9101',status:'QC issue',dc:'SDC-9101',
+     item:JSON.stringify([{p:'Tomato',q:50,box:5,rejectKg:4,rejectBox:1},{p:'Onion',q:30,box:3,rejectKg:0,rejectBox:0}]),
+   });
+   expect(delivery['issueQty']).toBe(4);
+   expect(delivery['accepted']).toBe(76);
+   expect(delivery['boxes']).toBe(8);
+   expect(delivery['rejectBoxes']).toBe(1);
+   const d=demo();
+   d['purchase-orders']=[...(d['purchase-orders']||[]),{id:'PO-9101',status:'Accepted',buyer:'FreshMart Retail',item:'[{"p":"Tomato","q":50}]',qty:50}];
+   d['sales-orders']=[...(d['sales-orders']||[]),normalize('sales-orders',{id:'SO-9101',status:'Confirmed',po:'PO-9101',buyer:'FreshMart Retail',item:JSON.stringify([{p:'Tomato',q:50,saleRate:40}])})];
+   d['dispatch']=[...(d['dispatch']||[]),{id:'SDC-9101',status:'Delivered',so:'SO-9101',buyer:'FreshMart Retail',qty:50,item:'[{"p":"Tomato","q":50}]'}];
+   d['deliveries']=[...(d['deliveries']||[]),normalize('deliveries',{
+     id:'DLV-9101',status:'QC issue',dc:'SDC-9101',
+     item:JSON.stringify([{p:'Tomato',q:50,box:5,rejectKg:4,rejectBox:6}]),
+   })];
+   expect(validateData(d)).toMatch(/rejected boxes exceed/);
  });
  it('prefers a buyer delivery address over city for the dispatch destination',()=>{
    expect(buyerLocation('FreshMart Retail',[

@@ -180,7 +180,11 @@ interface SplitItem {
   packs?: number;
   poId?: string;
   buyer?: string;
+  containerType?: string;
+  containerCount?: number;
 }
+
+const OUTWARD_CONTAINER_TYPES = ["Plastic crates", "Corrugated boxes", "Gunny bags", "Net bags"];
 
 type MainViewTab = "bay-packing" | "buyer-demands" | "demand-overview" | "packed-history";
 
@@ -626,6 +630,8 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
         packer: packer.trim(),
         packSize: sp.size,
         packs: packsCount,
+        containerType: sp.containerType || OUTWARD_CONTAINER_TYPES[0],
+        containerCount: sp.containerCount || 0,
         item: JSON.stringify([{ p: splitProduct, q: sp.qty }]),
       } as Row);
 
@@ -2316,6 +2322,47 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                               </div>
                             )}
 
+                            {/* Outward container type and box count for this split line */}
+                            <div className="w-40">
+                              <label className="text-[10px] font-semibold text-muted-foreground block mb-0.5">
+                                Container Type
+                              </label>
+                              <select
+                                aria-label="Container type"
+                                value={s.containerType || OUTWARD_CONTAINER_TYPES[0]}
+                                onChange={(e) => {
+                                  const value = e.target.value;
+                                  setSplits((prev) => prev.map((item, i) => (i === idx ? { ...item, containerType: value } : item)));
+                                }}
+                                className="h-8 w-full rounded-md border bg-background px-2 text-xs font-semibold outline-none focus:ring-1 focus:ring-primary"
+                              >
+                                {OUTWARD_CONTAINER_TYPES.map((type) => (
+                                  <option key={type} value={type}>{type}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="w-28">
+                              <label className="text-[10px] font-bold text-primary block mb-0.5">
+                                Box Count
+                              </label>
+                              <div className="inline-flex items-center gap-1 w-full">
+                                <input
+                                  aria-label="Box count"
+                                  type="number"
+                                  min={0}
+                                  step={1}
+                                  value={s.containerCount || ""}
+                                  placeholder="0"
+                                  onChange={(e) => {
+                                    const count = Math.max(0, Math.floor(Number(e.target.value) || 0));
+                                    setSplits((prev) => prev.map((item, i) => (i === idx ? { ...item, containerCount: count } : item)));
+                                  }}
+                                  className="h-8 w-full rounded-md border bg-background px-2 font-mono font-bold text-xs text-primary outline-none focus:ring-1 focus:ring-primary"
+                                />
+                                <span className="text-[11px] text-muted-foreground font-semibold">box</span>
+                              </div>
+                            </div>
+
                             {/* Remove Line */}
                             {splits.length > 1 && (
                               <button
@@ -2474,6 +2521,9 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
                       {!isPieceBased && (
                         <span className="text-muted-foreground ml-1">({kg(totalAllocatedKg)})</span>
                       )}
+                      <span className="text-muted-foreground"> · </span>
+                      <strong className="text-foreground">{splits.reduce((sum, s) => sum + num(s.containerCount), 0)} boxes</strong>
+                      <span className="text-muted-foreground ml-1">({[...new Set(splits.map((s) => s.containerType || OUTWARD_CONTAINER_TYPES[0]))].join(", ")})</span>
                     </div>
                     <div className="flex gap-2">
                       <Button variant="ghost" size="sm" onClick={() => setSplitProduct(null)}>

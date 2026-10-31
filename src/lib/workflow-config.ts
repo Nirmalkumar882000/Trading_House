@@ -8,6 +8,8 @@ const date: Field = {key:'date',label:'Date',type:'date',list:true};
 const person: Field = {key:'responsible',label:'Purchase Manager',required:true};
 const common = {date:'2026-10-22',responsible:'Ravi Kumar'};
 const item = (p:string,q:number,a?:number,a2?:number,b?:number) => JSON.stringify([{p,q,...(a===undefined?{}:{a,a2:a2||0,b:b||0})}]);
+// Demo multi-product sale (PO-1006) that reaches buyer delivery QC with per-product box counts.
+const multiProductSale = JSON.stringify([{p:'Amaranth Green Leaves (Arai Keerai)',q:25,saleRate:40,containerCount:4},{p:'Beans Broad (Avarakkaai)',q:20,saleRate:55,containerCount:3},{p:'Lady Finger (Vendikaai)',q:25,saleRate:42,containerCount:3}]);
 export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[] {
  const patches: Record<string,Partial<ModuleDef>> = {
   'purchase-orders':{
@@ -99,11 +101,12 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
       {...common,po:'PO-1003',buyer:'Nilgiris Supermarket',item:item('Potato',100),grade:'Grade A',packer:'Senthil P',packSize:10,nominal:100,packs:10,containerType:'Gunny bags',containerCount:10,status:'Packed'},
       {date:'2026-10-22',responsible:'Senthil P',po:'PO-1002',buyer:'Hotel Saravana Bhavan',item:item('Onion',40),grade:'Grade A',packer:'Senthil P',packSize:5,nominal:40,packs:8,containerType:'Net bags',containerCount:8,status:'In sales stock'},
       {date:'2026-10-24',responsible:'Senthil P',po:'PO-1006',buyer:'FreshMart Retail',item:JSON.stringify([{p:'Amaranth Green Leaves (Arai Keerai)',q:25},{p:'Beans Broad (Avarakkaai)',q:20}]),grade:'Grade A',packer:'Senthil P',packSize:0.25,nominal:45,packs:180,containerType:'Plastic crates',containerCount:6,status:'In sales stock'},
+      {date:'2026-10-24',responsible:'Senthil P',po:'PO-1006',buyer:'FreshMart Retail',item:item('Lady Finger (Vendikaai)',25),grade:'Grade A',packer:'Senthil P',packSize:0.25,nominal:25,packs:100,containerType:'Plastic crates',containerCount:3,status:'In sales stock'},
     ]
   },
   'sales-orders':{
     description:'Set a selling price per product in ₹/KG. Each product line and the order total flow to invoices and buyer ledgers.',
-    fields:[date,ref('buyer','Buyer'),ref('po','Buyer demand'),{...products,label:'Products · KG & selling price / KG'},number('qty','Actual supply KG',true),{key:'bags',label:'Pack to send (from demand)',type:'textarea',readOnly:true},{key:'rate',label:'Weighted average sale price / KG',type:'number',money:true,readOnly:true},{key:'value',label:'Sale value',type:'number',money:true,readOnly:true,list:true},person],
+    fields:[date,ref('buyer','Buyer'),ref('po','Buyer demand'),{...products,label:'Products · KG & selling price / KG'},number('qty','Actual supply KG',true),{key:'rate',label:'Weighted average sale price / KG',type:'number',money:true,readOnly:true},{key:'value',label:'Sale value',type:'number',money:true,readOnly:true,list:true},person],
     compute:(r)=> {
       const saleLines = parseLines(r['item']);
       if (!saleLines.some(line => line.saleRate !== undefined)) {
@@ -117,6 +120,7 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
       {...common,packing:'PK-1001',po:'PO-1001',buyer:'FreshMart Retail',item:item('Tomato',23),qty:23,rate:42,value:966,status:'Dispatched'},
       {...common,packing:'PK-1002',po:'PO-1003',buyer:'Nilgiris Supermarket',item:item('Potato',100),qty:100,rate:100,value:10000,status:'Closed'},
       {date:'2026-10-22',responsible:'Ravi Kumar',packing:'PK-1003',po:'PO-1002',buyer:'Hotel Saravana Bhavan',item:item('Onion',40),qty:40,rate:38,value:1520,status:'Confirmed'},
+      {date:'2026-10-25',responsible:'Ravi Kumar',packing:'PK-1004',po:'PO-1006',buyer:'FreshMart Retail',item:multiProductSale,status:'Dispatched'},
     ]
   },
   returns:{
@@ -136,14 +140,15 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
       {...common,so:'SO-1001',buyer:'FreshMart Retail',toLocation:'Udumalaipet',warehouse:'Main Warehouse (Udumalaipet)',item:item('Tomato',23),qty:23,transporter:'Kongu Agri Logistics',vehicle:'TN 78 AB 1234',driver:'Raja',charges:250,status:'Delivered'},
       {...common,so:'SO-1002',buyer:'Nilgiris Supermarket',toLocation:'Pollachi',warehouse:'Pollachi Depot',item:item('Potato',100),qty:100,transporter:'Pollachi Express Cargo',vehicle:'TN 41 CD 5678',driver:'Ganesh',charges:450,status:'Delivered'},
       {date:'2026-10-24',responsible:'Ravi Kumar',so:'SO-1003',buyer:'Hotel Saravana Bhavan',toLocation:'Coimbatore',warehouse:'Main Warehouse (Udumalaipet)',item:item('Onion',40),qty:40,transporter:'Anamalai Roadways',vehicle:'TN 39 EF 9012',driver:'Suresh',charges:300,status:'In transit'},
+      {date:'2026-10-25',responsible:'Ravi Kumar',so:'SO-1004',buyer:'FreshMart Retail',toLocation:'Udumalaipet',warehouse:'Pollachi Depot',item:multiProductSale,qty:70,containerType:'Plastic crates',containerCount:10,transporter:'Kongu Agri Logistics',vehicle:'TN 78 AB 1234',driver:'Raja',charges:350,status:'Delivered'},
     ]
   },
   deliveries:{
-    description:'Record buyer acceptance and product-level issues against an outward Sales DC.',
-    fields:[{key:'dc',label:'Sales DC',type:'select',required:true,list:true},{key:'buyer',label:'Buyer',type:'text',readOnly:true,list:true},{key:'item',label:'Products sent',type:'products',readOnly:true,list:true},{key:'accepted',label:'Accepted qty',type:'number',list:true,suffix:'kg'},{key:'issueQty',label:'Issue qty',type:'number',list:true,suffix:'kg'},{key:'remarks',label:'Remarks',type:'textarea'},person],
+    description:'Record buyer acceptance with an individual reject KG and box count for every product sent on an outward Sales DC.',
+    fields:[{key:'dc',label:'Sales DC',type:'select',required:true,list:true},{key:'buyer',label:'Buyer',type:'text',readOnly:true,list:true},{key:'item',label:'Products sent · boxes & rejects',type:'products',readOnly:true,list:true},{key:'accepted',label:'Accepted qty',type:'number',readOnly:true,list:true,suffix:'kg'},{key:'issueQty',label:'Rejected qty',type:'number',readOnly:true,list:true,suffix:'kg'},{key:'boxes',label:'Boxes sent',type:'number',readOnly:true,list:true},{key:'rejectBoxes',label:'Rejected boxes',type:'number',readOnly:true,list:true},{key:'remarks',label:'Remarks',type:'textarea'},person],
     seed:[
-      {dc:'SDC-1001',buyer:'FreshMart Retail',accepted:20,issueQty:3,remarks:'3 kg soft/damaged in transit',status:'Signed'},
-      {dc:'SDC-1002',buyer:'Nilgiris Supermarket',accepted:100,issueQty:0,remarks:'Delivered in full, grade verified',status:'Signed'},
+      {dc:'SDC-1001',buyer:'FreshMart Retail',item:JSON.stringify([{p:'Tomato',q:23,box:5,rejectKg:3,rejectBox:1}]),remarks:'3 kg soft/damaged in transit',status:'Signed'},
+      {dc:'SDC-1002',buyer:'Nilgiris Supermarket',item:JSON.stringify([{p:'Potato',q:100,box:10,rejectKg:0,rejectBox:0}]),remarks:'Delivered in full, grade verified',status:'Signed'},
     ]
   },
   invoices:{

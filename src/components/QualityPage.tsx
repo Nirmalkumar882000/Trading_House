@@ -801,11 +801,18 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
   const pendingSources = [...new Map(pending.map((record) => [sourceKey(record), record])).entries()];
   const records = pending.filter((record) => sourceKey(record) === lot2);
   
-  const field = (rec: Row, l: ProductLine, idx: number = 0) =>
+  // Buyer returns already given to earlier split lines of the same product in this record.
+  const retBefore = (rec: Row, product: string, idx: number): number =>
+    lines(rec, "input").slice(0, idx).reduce((sum, line, i) => (line.p === product ? sum + num(field(rec, line, i).ret) : sum), 0);
+  // Remaining buyer-return KG in quarantine for a product, excluding this QC record's own usage.
+  const returnsLeft = (rec: Row, product: string, idx: number) =>
+    Math.max(0, round(returnsAvailable(data, product, rec.id) - retBefore(rec, product, idx)));
+  const field = (rec: Row, l: ProductLine, idx: number = 0): S2Edit[string] =>
     edit[`${rec.id}|${l.p}|${idx}`] ?? edit[`${rec.id}|${l.p}`] ?? {
       a2: "",
       b: "",
-      ret: rec["sourceType"] === "Return" ? "0" : String(returnsAvailable(data, l.p, rec.id)),
+      // Split lines share one quarantine pool, so each line only defaults to what earlier lines left.
+      ret: rec["sourceType"] === "Return" ? "0" : String(returnsLeft(rec, l.p, idx)),
     };
   const setField = (rec: Row, l: ProductLine, patch: Partial<S2Edit[string]>, idx: number = 0) =>
     setEdit((e) => ({ ...e, [`${rec.id}|${l.p}|${idx}`]: { ...field(rec, l, idx), ...patch } }));
@@ -813,8 +820,21 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
   const saveStage2 = (rec: Row) => {
     const ls = lines(rec, "input").map((l, idx) => {
       const f = field(rec, l, idx);
-      return { ...l, a2: num(f.a2), b: num(f.b), ret: num(f.ret) };
+      return { ...l, a2: num(f.a2), b: num(f.b), ret: rec["sourceType"] === "Return" ? 0 : num(f.ret) };
     });
+    for (const l of ls) {
+      const pool = round(l.q - num(l.a) + num(l.ret));
+      if (num(l.a2) + num(l.b) > pool + 0.001) {
+        return void toast.error(`${l.p}${l.lineTag ? ` (${l.lineTag})` : ""}: Grade A + Grade B (${round(num(l.a2) + num(l.b))} kg) exceeds the Stage 2 pool of ${pool} kg.`);
+      }
+    }
+    for (const product of [...new Set(ls.map((l) => l.p))]) {
+      const entered = round(ls.filter((l) => l.p === product).reduce((sum, l) => sum + num(l.ret), 0));
+      const available = returnsAvailable(data, product, rec.id);
+      if (entered > available + 0.001) {
+        return void toast.error(`${product}: buyer returns entered across lines total ${entered} kg, but only ${available} kg is in returns quarantine. Reduce the + Buyer Returns values.`);
+      }
+    }
     const finalGrader = s2Graders[rec.id] || rec["grader"] || grader;
     const automatedEndTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
@@ -1445,13 +1465,25 @@ export function QualityPage({ mod }: { mod: ModuleDef }) {
                             {rec["sourceType"] === "Return" ? (
                               <span className="text-muted-foreground">Included in input</span>
                             ) : (
-                              <input
-                                type="number"
-                                min={0}
-                                className="w-20 h-7 rounded border bg-background px-2 text-xs font-mono"
-                                value={f.ret}
-                                onChange={(e) => setField(rec, l, { ret: e.target.value }, lIdx)}
-                              />
+                              (() => {
+                                const left = returnsLeft(rec, l.p, lIdx);
+                                const over = num(f.ret) > left + 0.001;
+                                return (
+                                  <div className="space-y-0.5">
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      aria-label={`${l.p} buyer returns KG`}
+                                      className={cn("w-20 h-7 rounded border bg-background px-2 text-xs font-mono", over && "border-destructive text-destructive")}
+                                      value={f.ret}
+                                      onChange={(e) => setField(rec, l, { ret: e.target.value }, lIdx)}
+                                    />
+                                    <p className={cn("text-[10px]", over ? "text-destructive font-semibold" : "text-muted-foreground")}>
+                                      {left} kg in quarantine
+                                    </p>
+                                  </div>
+                                );
+                              })()
                             )}
                           </td>
                           <td className="px-3 py-2 font-medium text-primary font-mono">{kg(pool)}</td>

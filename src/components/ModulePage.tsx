@@ -110,7 +110,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
         return {
           ...delivery,
           buyer: dispatch["buyer"] || delivery["buyer"] || "",
-          item: dispatch["item"] || delivery["item"] || "[]",
+          item: parseLines(delivery["item"]).length ? String(delivery["item"]) : dispatch["item"] || "[]",
         };
       });
     }
@@ -1076,6 +1076,8 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                 />
               ) : f.type === "buys" ? (
                 <BuysEditor need={need} products={f.options ?? []} suppliers={(data["suppliers"] ?? []).filter((x) => x.status !== "Inactive" && x.status !== "Rejected").map((x) => String(x["name"] ?? "")).filter(Boolean)} value={live[f.key]} onChange={(v) => set(f.key, v)} priceEditable={priceEditable} />
+              ) : f.type === "products" && mod.slug === "deliveries" ? (
+                <DeliveryRejectEditor value={live[f.key]} onChange={(v) => setForm((prev) => ({ ...prev, [f.key]: v }))} />
               ) : f.type === "products" && f.readOnly ? (
                 <div className="rounded-lg border bg-muted/40 p-3">
                   <ProductChips
@@ -1482,6 +1484,10 @@ function ProductChips({
             : !salePricing && showPrices && l.r !== undefined && l.r > 0
               ? ` @ ₹${l.r.toLocaleString("en-IN", { maximumFractionDigits: 2 })}/kg · ₹${(l.q * l.r).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`
               : ""}
+          {l.box ? ` · ${l.box} box` : ""}
+          {num(l.rejectKg) > 0 || num(l.rejectBox) > 0 ? (
+            <span className="text-destructive"> · rejected {num(l.rejectKg)} kg{num(l.rejectBox) > 0 ? ` / ${num(l.rejectBox)} box` : ""}</span>
+          ) : null}
         </span>
       ))}
       {!all && lines.length > 2 && <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">+{lines.length - 2}</span>}
@@ -1787,10 +1793,11 @@ function ProductPicker({
                     <th className="px-2.5 py-2 text-right">{grading ? "Input KG" : "Total KG"}</th>
                     {(pricing || sellingPricing) && (
                       <>
-                        <th className="px-2.5 py-2 text-right">{sellingPricing ? "Sale price · ₹/KG" : "Rate · ₹/KG"}</th>
+                        <th className="px-2.5 py-2 text-right">{sellingPricing ? "Sale price · ₹/KG" : "Purchase rate · ₹/KG"}</th>
                         <th className="px-2.5 py-2 text-right">Amount · ₹</th>
                       </>
                     )}
+                    {pricing && <th className="px-2.5 py-2 text-right">Sale price · ₹/KG</th>}
                     {grading && (
                       <>
                         <th className="px-2.5 py-2">First A</th>
@@ -1941,6 +1948,32 @@ function ProductPicker({
                             </td>
                           </>
                         )}
+                        {pricing && (
+                          <td className="px-2.5 py-2 text-right">
+                            <div className="inline-flex items-center justify-end gap-1">
+                              <span className="text-xs text-muted-foreground">₹</span>
+                              <input
+                                aria-label={`${l.p} sale price per KG`}
+                                min="0"
+                                type="number"
+                                step="any"
+                                disabled={!priceEditable}
+                                title={!priceEditable ? "Sale price is entered by back office only" : undefined}
+                                value={l.sellingPrice ?? ""}
+                                placeholder="0"
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  emit(lines.map((x) => {
+                                    if (x.p !== l.p) return x;
+                                    const { sellingPrice: _cleared, ...rest } = x;
+                                    return val === "" ? rest : { ...rest, sellingPrice: Math.max(0, Number(val) || 0) };
+                                  }));
+                                }}
+                                className="w-20 rounded-lg border bg-background px-2 py-1 text-right text-xs font-semibold text-blue-600 dark:text-blue-400 outline-none focus:border-primary disabled:bg-muted disabled:text-muted-foreground"
+                              />
+                            </div>
+                          </td>
+                        )}
                         {grading && (
                           <>
                             <td className="p-2">
@@ -2019,7 +2052,7 @@ function ProductPicker({
                     <td className="px-2.5 py-2 text-right tabular-nums font-bold text-foreground">
                       {totalQty.toLocaleString("en-IN")} kg
                     </td>
-                    {pricing && (
+                    {(pricing || sellingPricing) && (
                       <>
                         <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground">
                           Avg ₹{weightedAvgRate.toLocaleString("en-IN", { maximumFractionDigits: 2 })}/kg
@@ -2028,6 +2061,11 @@ function ProductPicker({
                           ₹{Math.round(totalAmount).toLocaleString("en-IN")}
                         </td>
                       </>
+                    )}
+                    {pricing && (
+                      <td className="px-2.5 py-2 text-right font-mono tabular-nums text-blue-600 dark:text-blue-400">
+                        ₹{Math.round(lines.reduce((a, l) => a + (Number(l.q) || 0) * num(l.sellingPrice), 0)).toLocaleString("en-IN")}
+                      </td>
                     )}
                     {grading && <td colSpan={stage2 ? 6 : 2} />}
                     <td />
@@ -2183,6 +2221,71 @@ function SupplierPriceDetailsDialog({
   );
 }
 
+function DeliveryRejectEditor({ value, onChange }: { value: unknown; onChange: (v: string) => void }) {
+  const lines = parseLines(value);
+  if (!lines.length) {
+    return <div className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">Select a Sales DC to load the products sent.</div>;
+  }
+  const patch = (p: string, change: Partial<ProductLine>) =>
+    onChange(JSON.stringify(lines.map((line) => (line.p === p ? { ...line, ...change } : line))));
+  const cell = "w-20 rounded-md border bg-background px-2 py-1 text-right text-xs tabular-nums outline-none focus:border-primary focus:ring-1 focus:ring-primary/20";
+  const totals = lines.reduce(
+    (t, l) => ({ q: t.q + l.q, box: t.box + num(l.box), rejectKg: t.rejectKg + num(l.rejectKg), rejectBox: t.rejectBox + num(l.rejectBox) }),
+    { q: 0, box: 0, rejectKg: 0, rejectBox: 0 },
+  );
+  return (
+    <div className="overflow-x-auto rounded-lg border">
+      <table className="w-full text-sm">
+        <thead className="bg-muted/60 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+          <tr>
+            <th className="px-3 py-2">Product</th>
+            <th className="px-3 py-2 text-right">Sent KG</th>
+            <th className="px-3 py-2 text-right">Boxes sent</th>
+            <th className="px-3 py-2 text-right">Rejected boxes</th>
+            <th className="px-3 py-2 text-right">Rejected KG</th>
+            <th className="px-3 py-2 text-right">Accepted KG</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y">
+          {lines.map((l) => {
+            const overKg = num(l.rejectKg) > l.q;
+            const overBox = num(l.box) > 0 && num(l.rejectBox) > num(l.box);
+            return (
+              <tr key={l.p}>
+                <td className="px-3 py-2 font-medium">{l.p}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{l.q}</td>
+                <td className="px-3 py-2 text-right">
+                  <input aria-label={`${l.p} boxes sent`} type="number" min="0" step="1" className={cell} value={l.box ?? ""} placeholder="0"
+                    onChange={(e) => patch(l.p, { box: Math.max(0, Number(e.target.value) || 0) })} />
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <input aria-label={`${l.p} rejected boxes`} type="number" min="0" step="1" className={cn(cell, overBox && "border-destructive text-destructive")} value={l.rejectBox ?? ""} placeholder="0"
+                    onChange={(e) => patch(l.p, { rejectBox: Math.max(0, Number(e.target.value) || 0) })} />
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <input aria-label={`${l.p} rejected KG`} type="number" min="0" step="any" className={cn(cell, overKg && "border-destructive text-destructive")} value={l.rejectKg ?? ""} placeholder="0"
+                    onChange={(e) => patch(l.p, { rejectKg: Math.max(0, Number(e.target.value) || 0) })} />
+                </td>
+                <td className="px-3 py-2 text-right font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">{Math.max(0, round(l.q - num(l.rejectKg)))}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+        <tfoot className="border-t bg-muted/40 text-xs font-semibold">
+          <tr>
+            <td className="px-3 py-2">{lines.length} products</td>
+            <td className="px-3 py-2 text-right tabular-nums">{round(totals.q)} kg</td>
+            <td className="px-3 py-2 text-right tabular-nums">{totals.box}</td>
+            <td className="px-3 py-2 text-right tabular-nums text-destructive">{totals.rejectBox}</td>
+            <td className="px-3 py-2 text-right tabular-nums text-destructive">{round(totals.rejectKg)} kg</td>
+            <td className="px-3 py-2 text-right tabular-nums text-emerald-700 dark:text-emerald-400">{Math.max(0, round(totals.q - totals.rejectKg))} kg</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  );
+}
+
 function SupplierPricesSummary({ row }: { row: Row }) {
   const ls = parseLines(row["item"]);
   if (!ls.length) return null;
@@ -2199,6 +2302,7 @@ function SupplierPricesSummary({ row }: { row: Row }) {
               <th className="px-2.5 py-1.5 text-right font-medium">Qty (kg)</th>
               <th className="px-2.5 py-1.5 text-right font-medium">Rate / kg</th>
               <th className="px-2.5 py-1.5 text-right font-medium">Amount</th>
+              <th className="px-2.5 py-1.5 text-right font-medium">Sale price / kg</th>
             </tr>
           </thead>
           <tbody className="divide-y">
@@ -2220,6 +2324,9 @@ function SupplierPricesSummary({ row }: { row: Row }) {
                   <td className="px-2.5 py-1.5 text-right font-mono tabular-nums font-semibold">
                     ₹{amt.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
                   </td>
+                  <td className="px-2.5 py-1.5 text-right tabular-nums">
+                    {num(l.sellingPrice) > 0 ? `₹${num(l.sellingPrice).toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : "—"}
+                  </td>
                 </tr>
               );
             })}
@@ -2232,6 +2339,7 @@ function SupplierPricesSummary({ row }: { row: Row }) {
               <td className="px-2.5 py-1.5 text-right font-mono text-primary tabular-nums">
                 ₹{num(row["amount"]).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
               </td>
+              <td />
             </tr>
           </tfoot>
         </table>
