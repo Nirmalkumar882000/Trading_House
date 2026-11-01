@@ -134,7 +134,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
   const navigate = useNavigate();
 
   const [search, setSearch] = useState("");
-  const [filterTab, setFilterTab] = useState<"all" | "pending" | "fulfilled">("all");
+  // Open on demand still to buy; products already covered by a planned or submitted market trip move to "Planned / Bought".
+  const [filterTab, setFilterTab] = useState<"all" | "pending" | "fulfilled">("pending");
   const [selectedProduct, setSelectedProduct] = useState<ProductPlan | null>(null);
   const [editingPoBuffer, setEditingPoBuffer] = useState<{ poId: string; buffer: number } | null>(null);
   const [bufferInputs, setBufferInputs] = useState<Record<string, string>>({});
@@ -446,7 +447,15 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
   }, [filteredPlans]);
 
   // Selection helpers
+  const pendingPlanCount = plans.filter((p) => p.balance > 0).length;
+  const plannedPlanCount = plans.length - pendingPlanCount;
+
   const handleToggleSelectProduct = (product: string) => {
+    const plan = plans.find((p) => p.product === product);
+    if (plan && plan.balance <= 0 && !selectedProducts.has(product)) {
+      toast.info(`${product} is already covered by a planned market trip.`);
+      return;
+    }
     setSelectedProducts((prev) => {
       const next = new Set(prev);
       if (next.has(product)) next.delete(product);
@@ -456,10 +465,11 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
   };
 
   const handleSelectAll = () => {
-    if (selectedProducts.size === filteredPlans.length) {
+    const selectable = filteredPlans.filter((p) => p.balance > 0);
+    if (selectable.length > 0 && selectedProducts.size === selectable.length) {
       setSelectedProducts(new Set());
     } else {
-      setSelectedProducts(new Set(filteredPlans.map((p) => p.product)));
+      setSelectedProducts(new Set(selectable.map((p) => p.product)));
     }
   };
 
@@ -1009,6 +1019,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
     setIsTripModalOpen(false);
     setSelectedProducts(new Set());
+    // Planned products leave the pending list; they stay visible under "Planned / Bought".
+    setFilterTab("pending");
   };
 
   // WhatsApp Message for specific trip & transport movement
@@ -1516,10 +1528,10 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
           ) : (
             <>
               <span className="flex size-6 items-center justify-center rounded-full bg-primary/20 text-xs font-bold text-primary">
-                {plans.length}
+                {pendingPlanCount}
               </span>
               <span className="text-xs font-semibold text-foreground">
-                Active Demand Items ·{" "}
+                Pending Demand Items ·{" "}
                 <span className="text-primary font-bold">
                   {totalBalance > 0
                     ? `${formatKg2(totalBalance)} kg (${totalBalancePackets.toLocaleString("en-IN")} pkts) pending purchase`
@@ -1541,7 +1553,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
         <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"
-            onClick={() => openPlanTripModal(plans.filter((p) => selectedProducts.has(p.product)), "Inward")}
+            onClick={() => openPlanTripModal(plans.filter((p) => selectedProducts.has(p.product) && p.balance > 0), "Inward")}
             disabled={selectedProducts.size === 0}
             title={selectedProducts.size === 0 ? "Select products to plan a market trip" : undefined}
             className="h-8 bg-primary text-primary-foreground text-xs font-semibold shadow-xs hover:opacity-95"
@@ -1574,7 +1586,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                 filterTab === "all" ? "bg-card text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground"
               )}
             >
-              All Products ({plans.length})
+              All ({plans.length})
             </button>
             <button
               onClick={() => setFilterTab("pending")}
@@ -1585,7 +1597,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
-              Pending Buy
+              Pending Buy ({pendingPlanCount})
             </button>
             <button
               onClick={() => setFilterTab("fulfilled")}
@@ -1596,7 +1608,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                   : "text-muted-foreground hover:text-foreground"
               )}
             >
-              Fulfilled
+              Planned / Bought ({plannedPlanCount})
             </button>
           </div>
         </div>
@@ -1791,7 +1803,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                           <td className="px-3 py-3 text-center">
                             <button
                               onClick={() => handleToggleSelectProduct(p.product)}
-                              className="flex size-4 items-center justify-center rounded border border-muted-foreground/40 text-primary transition-colors hover:border-primary"
+                              title={p.balance <= 0 ? "Already covered by a planned market trip" : undefined}
+                              className={cn("flex size-4 items-center justify-center rounded border border-muted-foreground/40 text-primary transition-colors hover:border-primary", p.balance <= 0 && "cursor-not-allowed opacity-40")}
                             >
                               {isSelected ? (
                                 <CheckSquare className="size-3.5 fill-primary text-primary-foreground" />
@@ -2022,7 +2035,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
                       <td className="px-3 py-3 text-center">
                         <button
                           onClick={() => handleToggleSelectProduct(p.product)}
-                          className="flex size-4 items-center justify-center rounded border border-muted-foreground/40 text-primary transition-colors hover:border-primary"
+                          title={p.balance <= 0 ? "Already covered by a planned market trip" : undefined}
+                          className={cn("flex size-4 items-center justify-center rounded border border-muted-foreground/40 text-primary transition-colors hover:border-primary", p.balance <= 0 && "cursor-not-allowed opacity-40")}
                         >
                           {isSelected ? (
                             <CheckSquare className="size-3.5 fill-primary text-primary-foreground" />
