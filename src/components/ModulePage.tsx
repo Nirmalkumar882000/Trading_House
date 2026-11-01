@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ArrowRight, Check, ChevronDown, Pencil, Plus, Search, Trash2, X, Download, FileText, Scale, QrCode, Eye, MessageCircle, Package, RotateCcw, Clock, Boxes, Sparkles, CheckCircle2, BookOpen, Building2 } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, Pencil, Plus, Search, Trash2, X, Download, FileText, Scale, QrCode, Eye, MessageCircle, Package, RotateCcw, Clock, Boxes, Sparkles, CheckCircle2, BookOpen, Building2, Printer } from "lucide-react";
 import { toast } from "sonner";
 import { fmtMoney, type Field, type ModuleDef, type Row, PRODUCT_CATALOG, getPackSpecOptions, totalPacketCount, DEFAULT_WAREHOUSE, WAREHOUSES } from "@/lib/modules";
 import { useStore } from "@/lib/store";
@@ -24,13 +24,15 @@ import { ReturnContainerModal } from "./ReturnContainerModal";
 import { ContainerReturnChallanModal } from "./ContainerReturnChallanModal";
 import { ProductCatalogModal } from "./ProductCatalogModal";
 import { WarehouseReceiptDialog } from "./WarehouseReceiptDialog";
-import { InvoiceViewModal } from "./InvoiceViewModal";
+import { InvoiceViewModal, shareInvoiceOnWhatsApp } from "./InvoiceViewModal";
+import { ReturnDcPrintModal } from "./ReturnDcPrintModal";
+import { GradeBSaleModal } from "./GradeBSaleModal";
 import { StatusBadge } from "./StatusBadge";
 import { cn } from "@/lib/utils";
 import { outstandingDemand } from "@/lib/sourcing";
 import { Button } from "./ui/button";
 import { EmployeeSelect } from "./EmployeeSelect";
-import { bagBreakdown, buyerLocation, buysFromTrip, draftInvoiceForSalesOrder, invoiceForSalesOrder, marketTripDemand, parseBuys, returnsAvailable, returnFromDelivery, RETURN_OPEN_STATUSES, lines, normalize, num, parseLines, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, syncReceiptDownstream, total, validateData, round, type ProductLine } from "@/lib/workflow";
+import { availableStock, bagBreakdown, buyerLocation, directGradeBSale, gradeBReserved, isGradeB, buysFromTrip, draftInvoiceForSalesOrder, finalInvoiceWithReturns, invoiceReturnSummary,invoiceForSalesOrder, marketTripDemand, parseBuys, returnsAvailable, returnFromDelivery, RETURN_OPEN_STATUSES, lines, normalize, num, parseLines, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, syncReceiptDownstream, total, validateData, round, type ProductLine } from "@/lib/workflow";
 export { parseLines } from "@/lib/workflow";
 
 function getCreateButtonLabel(slug: string, title: string): string {
@@ -78,6 +80,9 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
     if (mod.slug === "supplier-prices") {
       return supplierPricesFromTrips(data["trips"] ?? [], baseRows);
     }
+    if (mod.slug === "purchase-orders") {
+      return baseRows.map((po) => (po["grade"] ? po : { ...po, grade: "Grade A" }));
+    }
     if (mod.slug === "sales-orders") {
       const dispatches = data["dispatch"] ?? [];
       const invoices = data["invoices"] ?? [];
@@ -85,7 +90,12 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
         const invoice = invoiceForSalesOrder(sale.id, dispatches, invoices);
         return {
           ...sale,
-          invoice: invoice ? `${invoice.id} · ${invoice.status || "Draft"}` : "Available after dispatch",
+          grade: sale["grade"] || "Grade A",
+          invoice: invoice
+            ? (invoice.status || "Draft") === "Draft"
+              ? `PROF-${invoice.id}`
+              : `${invoice.id} · ${invoice.status}`
+            : "Available after dispatch",
         };
       });
     }
@@ -201,6 +211,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
     if (mod.slug === "invoices") {
       const dispatches = data["dispatch"] ?? [];
       const salesOrders = data["sales-orders"] ?? [];
+      const deliveries = data["deliveries"] ?? [];
       return baseRows.map((invoice) => {
         const dispatch = dispatches.find((entry) => entry.id === invoice["dc"]);
         const sale = salesOrders.find((entry) => entry.id === (invoice["so"] || dispatch?.["so"]));
@@ -213,7 +224,9 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
           ...line,
           saleRate: line.saleRate ?? saleLines.find((saleLine) => saleLine.p === line.p)?.saleRate ?? saleRate,
         })));
-        return { ...invoice, so: sale.id, item, rate: saleRate };
+        const withSale = { ...invoice, so: sale.id, item, rate: saleRate, grade: sale["grade"] || "Grade A" };
+        const summary = invoiceReturnSummary(withSale, deliveries);
+        return { ...withSale, returnKg: summary.returnKg, payable: summary.total };
       });
     }
     return baseRows;
@@ -232,6 +245,8 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
   const [returnContainerRow, setReturnContainerRow] = useState<Row | null>(null);
   const [returnChallanRow, setReturnChallanRow] = useState<Row | null>(null);
   const [invoiceViewRow, setInvoiceViewRow] = useState<Row | null>(null);
+  const [returnDcPrintRow, setReturnDcPrintRow] = useState<Row | null>(null);
+  const [gradeBSaleRow, setGradeBSaleRow] = useState<Row | null>(null);
   const view = rows.find((r) => r.id === viewId) ?? null;
   const cols = useMemo(() => {
     const base = mod.fields.filter((f) => f.list);
@@ -275,6 +290,37 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
       `_Purchase Manager, please arrange market procurement and truck loading._`;
 
     window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank", "noopener,noreferrer");
+  };
+
+  const buyerPhone = (buyer: unknown) => {
+    const match = (data["buyers"] ?? []).find((entry) => String(entry["name"] || "").toLowerCase() === String(buyer || "").toLowerCase());
+    return match?.["phone"] ? String(match["phone"]) : undefined;
+  };
+
+  // Converts a proforma (or an issued invoice with pending buyer returns) into the final buyer invoice.
+  const createFinalInvoice = (invoice: Row) => {
+    const stored = (data["invoices"] ?? []).find((entry) => entry.id === invoice.id);
+    const issued = finalInvoiceWithReturns({ ...stored, ...invoice }, data["deliveries"] ?? []);
+    const { payable: _payable, ...persisted } = issued;
+    upsert("invoices", persisted as Row);
+    setInvoiceViewRow((current) => (current?.id === issued.id ? ({ ...issued, payable: num(issued["total"]) } as Row) : current));
+    toast.success(`${issued.id} invoice created · ${fmtMoney(issued["total"])} payable${num(issued["returnKg"]) ? ` after ${issued["returnKg"]} kg returns` : ""}`);
+  };
+
+  const saleForOrder = (po: Row) => (data["sales-orders"] ?? []).find((sale) => sale["po"] === po.id);
+
+  // Grade B buyer order → confirmed sale straight from Grade B inventory, plus its proforma invoice.
+  const createGradeBSale = (po: Row, saleLines: ProductLine[]) => {
+    const draft = directGradeBSale(po, data, nextId("sales-orders"));
+    const sale = normalize("sales-orders", { ...draft, item: JSON.stringify(saleLines), qty: total(saleLines) });
+    const err = validateData({ ...data, "sales-orders": [...(data["sales-orders"] ?? []), sale] });
+    if (err) { toast.error(err); return; }
+    upsert("sales-orders", sale);
+    const invoice = draftInvoiceForSalesOrder(sale, nextId("invoices"), data["dispatch"] ?? []);
+    upsert("invoices", invoice);
+    upsert("purchase-orders", { ...po, status: "Converted" });
+    setGradeBSaleRow(null);
+    toast.success(`${sale.id} created from Grade B stock (${num(sale["qty"])} kg · ${fmtMoney(sale["value"])}) · PROF-${invoice.id} raised`);
   };
 
   const filtered = useMemo(
@@ -362,7 +408,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
 
   const blank = (): Row => {
     const today = new Date().toISOString().slice(0, 10);
-    const r: Row = { id: nextId(mod.slug), status: mod.statuses[0] ?? "" };
+    const r: Row = { id: nextId(mod.slug), status: mod.statuses[0] ?? "", ...(mod.slug === "purchase-orders" || mod.slug === "sales-orders" ? { grade: "Grade A" } : {}) };
     mod.fields.forEach((f) => (r[f.key] = f.type === "products" || f.type === "buys" ? "[]" : f.type === "number" ? 0 : f.type === "date" ? today : (mod.slug === "supplier-prices" && (f.key === "supplier" || f.key === "dc") ? "" : (f.options?.[0] ?? (f.key === "responsible" ? "Ravi Kumar" : "")))));
     return r;
   };
@@ -479,7 +525,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                   Sales Order ➔ Warehouse Stock Deduction Process
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  Packed produce in Dispatch Bay is allocated for buyer demand. Marking orders as <strong>Dispatched</strong> or <strong>Closed</strong> automatically deducts stock from warehouse inventory to Buyer (<code className="text-primary font-semibold">Packed ➔ Buyer</code>).
+                  <strong>Grade A</strong> orders sell packed produce from the Dispatch Bay (<code className="text-primary font-semibold">Packed ➔ Buyer</code>); <strong>Grade B</strong> orders sell loose KG straight from inventory without packing (<code className="text-blue-600 font-semibold">Grade B ➔ Buyer</code>). Stock is deducted when an order is marked <strong>Dispatched</strong> or <strong>Closed</strong>.
                 </p>
               </div>
             </div>
@@ -515,9 +561,13 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
             const packedAvailableKg = stock(data)
               .filter((s) => s.category === "Packed")
               .reduce((s, x) => s + x.qty, 0);
+            const gradeBAvailableKg = round(stock(data)
+              .filter((s) => s.category === "Grade B" && s.qty > 0)
+              .reduce((s, x) => s + x.qty, 0));
+            const gradeBReservedKg = gradeBReserved(data);
 
             return (
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                 <div className="rounded-xl border bg-card p-2.5 shadow-2xs">
                   <p className="text-[11px] font-medium text-muted-foreground">Deducted from Stock</p>
                   <p className="font-mono text-base font-bold text-emerald-600 dark:text-emerald-400">
@@ -545,6 +595,13 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                     {packedAvailableKg.toLocaleString("en-IN")} kg
                   </p>
                   <p className="text-[10px] text-muted-foreground">Available in Dispatch Bay</p>
+                </div>
+                <div className="rounded-xl border border-blue-500/25 bg-card p-2.5 shadow-2xs">
+                  <p className="text-[11px] font-medium text-muted-foreground">On-Hand Grade B Stock</p>
+                  <p className="font-mono text-base font-bold text-blue-600 dark:text-blue-400">
+                    {gradeBAvailableKg.toLocaleString("en-IN")} kg
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">{gradeBReservedKg.toLocaleString("en-IN")} kg reserved for Grade B sales</p>
                 </div>
               </div>
             );
@@ -594,6 +651,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                               setInvoiceViewRow({
                                 ...linkedInvoice,
                                 so: linkedInvoice["so"] || r.id,
+                                grade: r["grade"] || "Grade A",
                                 buyer: linkedInvoice["buyer"] || r["buyer"] || "",
                                 item: linkedInvoice["item"] || r["item"] || "[]",
                                 rate: linkedInvoice["rate"] || r["rate"] || 0,
@@ -614,13 +672,32 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                             event.stopPropagation();
                             const invoice = draftInvoiceForSalesOrder(r, nextId("invoices"), data["dispatch"] ?? []);
                             upsert("invoices", invoice);
-                            toast.success(`${invoice.id} draft created for ${r.id}`);
+                            toast.success(`PROF-${invoice.id} proforma invoice created for ${r.id}`);
                           }}
                         >
-                          Create draft
+                          Prof Inv
                         </Button>
                       ) : (
                         <span className="text-muted-foreground">Available after dispatch</span>
+                      )
+                    ) : mod.slug === "deliveries" && c.key === "returnRef" ? (
+                      r[c.key] ? (
+                        <button
+                          type="button"
+                          title={`Print ${String(r[c.key])}`}
+                          className="inline-flex items-center gap-1.5 font-medium text-primary underline-offset-2 hover:underline"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            const returnDc = (data["returns"] ?? []).find((entry) => entry.id === r[c.key] || entry["delivery"] === r.id);
+                            if (returnDc) setReturnDcPrintRow({ ...returnDc, __delivery: r.id });
+                            else toast.error(`${String(r[c.key])} return DC record not found`);
+                          }}
+                        >
+                          {String(r[c.key])}
+                          <Printer className="size-3.5" />
+                        </button>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
                       )
                     ) : c.key === "warehouse" ? (
                       <span className="inline-flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400 border border-amber-500/20">
@@ -667,7 +744,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                           </span>
                         ) : r.status === "Confirmed" ? (
                           <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-blue-700 dark:text-blue-400 bg-blue-500/10 border border-blue-500/20 px-1.5 py-0.5 rounded">
-                            <Clock className="size-3" /> Held in Dispatch Bay ({Number(r.qty || 0)} kg)
+                            <Clock className="size-3" /> {isGradeB(r) ? "Reserved from Grade B stock" : "Held in Dispatch Bay"} ({Number(r.qty || 0)} kg)
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
@@ -697,6 +774,31 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                           >
                             <MessageCircle className="size-4" />
                           </Button>
+                          {saleForOrder(r) ? (
+                            <span className="self-center whitespace-nowrap rounded-md bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                              {saleForOrder(r)?.id}
+                            </span>
+                          ) : isGradeB(r) ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              title="Grade B: sell loose KG directly from Grade B inventory (no packing)"
+                              disabled={r.status === "Rejected"}
+                              onClick={() => setGradeBSaleRow(r)}
+                              className="h-7 whitespace-nowrap px-2 text-xs text-blue-700"
+                            >
+                              New Sale
+                            </Button>
+                          ) : (
+                            <Link
+                              to="/m/$module"
+                              params={{ module: "packing" }}
+                              title="Grade A: pack this order, then create the sale"
+                              className="self-center whitespace-nowrap rounded-md border px-2 py-1 text-xs font-medium text-primary hover:bg-primary-soft"
+                            >
+                              Pack →
+                            </Link>
+                          )}
                         </>
                       )}
                       {(mod.slug === "trips" || mod.slug === "transport") && (
@@ -710,15 +812,37 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                         </Button>
                       )}
                       {mod.slug === "invoices" && (
-                        <Button
-                          variant="ghost"
-                          title="View and print proforma invoice"
-                          aria-label={`View proforma invoice ${r.id}`}
-                          onClick={() => setInvoiceViewRow(r)}
-                          className="rounded-md p-1.5 text-primary hover:bg-primary-soft"
-                        >
-                          <Eye className="size-4" />
-                        </Button>
+                        <>
+                          {r.status === "Draft" && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              title="Create final invoice after deducting buyer returns"
+                              onClick={() => createFinalInvoice(r)}
+                              className="h-7 px-2 text-xs text-primary"
+                            >
+                              Create invoice
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost"
+                            title="View, adjust returns and print invoice"
+                            aria-label={`View invoice ${r.id}`}
+                            onClick={() => setInvoiceViewRow(r)}
+                            className="rounded-md p-1.5 text-primary hover:bg-primary-soft"
+                          >
+                            <Eye className="size-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            title="Share invoice with buyer via WhatsApp"
+                            aria-label={`Share invoice ${r.id} on WhatsApp`}
+                            onClick={() => shareInvoiceOnWhatsApp(r, invoiceReturnSummary(r, data["deliveries"] ?? []), buyerPhone(r["buyer"]))}
+                            className="rounded-md p-1.5 text-emerald-600 hover:bg-emerald-500/10"
+                          >
+                            <MessageCircle className="size-4" />
+                          </Button>
+                        </>
                       )}
                       {mod.slug === "receipts" && (
                         <>
@@ -856,8 +980,30 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
         />
       )}
       {invoiceViewRow && (
-        <InvoiceViewModal invoice={invoiceViewRow} onClose={() => setInvoiceViewRow(null)} />
+        <InvoiceViewModal
+          invoice={invoiceViewRow}
+          deliveries={data["deliveries"] ?? []}
+          buyerPhone={buyerPhone(invoiceViewRow["buyer"])}
+          onCreateInvoice={createFinalInvoice}
+          onClose={() => setInvoiceViewRow(null)}
+        />
       )}
+
+      {gradeBSaleRow && (
+        <GradeBSaleModal
+          po={gradeBSaleRow}
+          draftSale={directGradeBSale(gradeBSaleRow, data, nextId("sales-orders"))}
+          available={(product) => availableStock(data, "Grade B", product)}
+          onConfirm={(saleLines) => createGradeBSale(gradeBSaleRow, saleLines)}
+          onClose={() => setGradeBSaleRow(null)}
+        />
+      )}
+
+      {returnDcPrintRow && (() => {
+        const delivery = rows.find((entry) => entry.id === returnDcPrintRow["__delivery"]);
+        const dispatch = (data["dispatch"] ?? []).find((entry) => entry.id === (returnDcPrintRow["salesDc"] || delivery?.["dc"]));
+        return <ReturnDcPrintModal returnDc={returnDcPrintRow} delivery={delivery} dispatch={dispatch} onClose={() => setReturnDcPrintRow(null)} />;
+      })()}
 
       {challanRow && (
         <DeliveryChallanModal
@@ -1034,6 +1180,10 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
         qty: round(baseQty + extra),
       };
     }
+    if (mod.slug === "sales-orders" && k === "grade") {
+      // Changing grade switches the stock source (Packed vs Grade B), so the demand and products are chosen again.
+      return { ...f, grade: String(v), po: "", item: "[]", qty: 0, value: 0, rate: 0 };
+    }
     if (mod.slug === "sales-orders" && k === "po") {
       const populated = populate(mod.slug, k, String(v), f, data);
       const existingLines = parseLines(f["item"]);
@@ -1189,6 +1339,8 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                         set(f.key, v);
                       }
                     }}
+                    kgOnly={(mod.slug === "purchase-orders" || mod.slug === "sales-orders") && live["grade"] === "Grade B"}
+                    available={live["grade"] === "Grade B" ? (product) => availableStock(data, "Grade B", product) : undefined}
                     grading={mod.slug === "quality-check"}
                     stage2={live.status === "Stage 2 done"}
                     returnsAvail={(p) => live["sourceType"] === "Return" ? 0 : returnsAvailable(data, p, form.id)}
@@ -1222,6 +1374,7 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                     <option value="">Select {f.label}</option>
                     {(referenceModule(mod.slug, f.key, form) ? (data[referenceModule(mod.slug, f.key, form) ?? ""] ?? []).filter(r => {
                       if (mod.slug === "receipts") return r.status === "Submitted";
+                      if (mod.slug === "packing" && f.key === "po" && isGradeB(r)) return false;
                       if (mod.slug === "quality-check") {
                         if (form["sourceType"] !== "Return") return r.status === "Posted";
                         if (!["Received", "Sent to QC"].includes(r.status)) return false;
@@ -1244,11 +1397,41 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                         const alreadyRecorded = (data["deliveries"] ?? []).some((delivery) => delivery["dc"] === r.id && delivery.id !== form.id);
                         return !alreadyRecorded || r.id === form["dc"];
                       }
-                      if (mod.slug === "sales-orders" && f.key === "po") return r["buyer"] === form["buyer"] && r.status !== "Rejected";
+                      if (mod.slug === "sales-orders" && f.key === "po") return r["buyer"] === form["buyer"] && r.status !== "Rejected" && isGradeB(r) === isGradeB(form);
                       return r.status !== "Rejected" && r.status !== "Inactive";
                     }).map(r => ({ value: ["buyer", "supplier", "transporter"].includes(f.key) ? String(r["name"]) : r.id, label: `${mod.slug === "receipts" && f.key === "dc" ? (data["transport"] ?? []).find((t) => t["ref"] === r.id)?.id ?? r.id : r.id} · ${r["name"] || r["buyer"] || r["supplier"] || r["lot"] || r.status}` })) : (f.options ?? []).map(o => ({ value:o, label:o }))).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
-                  {mod.slug === "sales-orders" && f.key === "po" && live["po"] && (() => {
+                  {mod.slug === "sales-orders" && f.key === "po" && !live["po"] && (
+                    <p className="mt-1.5 text-[11px] text-muted-foreground">
+                      {isGradeB(live)
+                        ? "Grade B: only Grade B buyer orders are listed. Sold loose in KG directly from Grade B inventory — no packing."
+                        : "Grade A: only Grade A buyer orders are listed. Produce must be packed in Allocation & Packing first."}
+                    </p>
+                  )}
+                  {mod.slug === "sales-orders" && f.key === "po" && live["po"] && isGradeB(live) && (() => {
+                    const poRef = (data["purchase-orders"] ?? []).find(x => x.id === live["po"]);
+                    const poLines = poRef ? lines(poRef) : [];
+                    const availKg = round(poLines.reduce((sum, l) => sum + availableStock(data, "Grade B", l.p), 0));
+                    const poTotalKg = poLines.reduce((sum, l) => sum + l.q, 0);
+                    return (
+                      <div className="mt-2 rounded-xl border border-blue-500/25 bg-blue-500/5 p-2.5 text-xs space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-foreground flex items-center gap-1.5">
+                            <Boxes className="size-3.5 text-blue-600" /> Grade B Stock in Inventory:
+                          </span>
+                          <span className={cn("font-bold font-mono px-2 py-0.5 rounded text-xs", availKg > 0 ? "bg-blue-500/15 text-blue-700 dark:text-blue-300" : "bg-amber-500/15 text-amber-700 dark:text-amber-400")}>
+                            {availKg} kg for {poTotalKg} kg demand
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                          {availKg > 0
+                            ? "Sale KG is capped to Grade B stock. Saving as Dispatched or Closed deducts it from Grade B inventory (Grade B ➔ Buyer)."
+                            : "⚠️ No Grade B stock for these products yet. Grade B is produced in Quality Check Stage 2."}
+                        </p>
+                      </div>
+                    );
+                  })()}
+                  {mod.slug === "sales-orders" && f.key === "po" && live["po"] && !isGradeB(live) && (() => {
                     const currentPacked = stock(data).filter(s => s.category === "Packed");
                     const poRef = (data["purchase-orders"] ?? []).find(x => x.id === live["po"]);
                     const poLines = poRef ? lines(poRef) : [];
@@ -1398,14 +1581,14 @@ function DetailPanel({
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/15 px-2 py-0.5 text-xs font-bold text-amber-700 dark:text-amber-400">
-                    <Clock className="size-3.5" /> Held in Dispatch Bay
+                    <Clock className="size-3.5" /> {isGradeB(row) ? "Reserved from Grade B stock" : "Held in Dispatch Bay"}
                   </span>
                 )}
               </div>
               <div className="space-y-1 text-muted-foreground text-[11px] border-t pt-2">
                 <div className="flex justify-between">
                   <span>Stock Movement:</span>
-                  <strong className="text-foreground">Dispatch Bay (Packed) ➔ Buyer ({String(row["buyer"])})</strong>
+                  <strong className="text-foreground">{isGradeB(row) ? "Grade B stock (loose KG)" : "Dispatch Bay (Packed)"} ➔ Buyer ({String(row["buyer"])})</strong>
                 </div>
                 <div className="flex justify-between">
                   <span>Quantity Deducted:</span>
@@ -1549,6 +1732,8 @@ function ProductPicker({
   defaultSellingPrice,
   defaultRate = 0,
   priceEditable = true,
+  kgOnly = false,
+  available,
 }: {
   options: string[];
   value: unknown;
@@ -1561,6 +1746,9 @@ function ProductPicker({
   defaultSellingPrice?: (product: string) => number;
   defaultRate?: number;
   priceEditable?: boolean;
+  /** Grade B buyer orders: loose KG only (no packets), with inventory available per product. */
+  kgOnly?: boolean;
+  available?: ((product: string) => number) | undefined;
 }) {
   const { catalog } = useStore();
   const [catalogPickerOpen, setCatalogPickerOpen] = useState(false);
@@ -1575,6 +1763,11 @@ function ProductPicker({
     const spec = catalog.find((item) => item.name === p) || PRODUCT_CATALOG.find((item) => item.name === p);
     const defaultPackSizeKg = spec?.packSizeKg && spec.packSizeKg > 0 ? spec.packSizeKg : 1.0;
     const defaultPackLabel = spec?.defaultPackSize ?? (defaultPackSizeKg < 1 ? `${Math.round(defaultPackSizeKg * 1000)} g` : `${defaultPackSizeKg} kg`);
+    if (kgOnly) {
+      const stockKg = available?.(p) ?? 0;
+      emit(lines.some((l) => l.p === p) ? lines.filter((l) => l.p !== p) : [...lines, { p, q: stockKg > 0 ? Math.min(1, stockKg) : 1, ...(sellingPricing ? { saleRate: defaultSellingPrice?.(p) ?? 0 } : {}) }]);
+      return;
+    }
     emit(
       lines.some((l) => l.p === p)
         ? lines.filter((l) => l.p !== p)
@@ -1625,7 +1818,7 @@ function ProductPicker({
 
   const shownOptions = useMemo(() => {
     const q = filterQuery.trim().toLowerCase();
-    return allOptions.filter((o) => {
+    const matched = allOptions.filter((o) => {
       const spec = catalog.find((item) => item.name === o) || PRODUCT_CATALOG.find((item) => item.name === o);
       const matchesCategory =
         selectedCategory === "All" || spec?.category === selectedCategory;
@@ -1639,9 +1832,10 @@ function ProductPicker({
         o.toLowerCase().includes(q) ||
         (spec?.category && spec.category.toLowerCase().includes(q)) ||
         (spec?.defaultPackSize && spec.defaultPackSize.toLowerCase().includes(q));
-      return matchesCategory && matchesPackSize && matchesQuery;
+      return matchesCategory && (kgOnly || matchesPackSize) && matchesQuery;
     });
-  }, [allOptions, catalog, selectedCategory, selectedPackSize, filterQuery]);
+    return kgOnly && available ? [...matched].sort((a, b) => available(b) - available(a)) : matched;
+  }, [allOptions, catalog, selectedCategory, selectedPackSize, filterQuery, kgOnly, available]);
 
   return (
     <div className={cn("rounded-2xl border bg-muted/20", sellingPricing ? "space-y-2 p-2.5" : "space-y-3 p-3.5")}>
@@ -1700,8 +1894,19 @@ function ProductPicker({
             )}
           </div>
 
+          {kgOnly && (
+            allOptions.some((o) => (available?.(o) ?? 0) > 0) ? (
+              <div className="mt-2 rounded-lg border border-blue-500/25 bg-blue-500/10 px-2.5 py-1.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
+                Grade B · loose KG from inventory. Products with Grade B stock are listed first.
+              </div>
+            ) : (
+              <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[10px] font-medium text-amber-800 dark:text-amber-300">
+                No Grade B stock in inventory yet. Grade B is produced in Quality Check Stage 2 — you can still record the order, and sell it once Grade B stock is graded.
+              </div>
+            )
+          )}
           {/* Pack Size Quick Filter Chips (250 g, 500 g, 1 kg, etc.) */}
-          <div className="flex items-center gap-1 overflow-x-auto py-1.5 scrollbar-none border-b border-border/40">
+          <div className={cn("flex items-center gap-1 overflow-x-auto py-1.5 scrollbar-none border-b border-border/40", kgOnly && "hidden")}>
             <span className="text-[10px] font-semibold text-muted-foreground shrink-0 pr-1">Size:</span>
             {PACK_SIZES.map((sz) => {
               const active = selectedPackSize === sz;
@@ -1769,9 +1974,15 @@ function ProductPicker({
                       {spec?.category && (
                         <span className="rounded bg-muted px-1.5 py-0.2 font-medium text-muted-foreground">{spec.category}</span>
                       )}
-                      <span className="rounded bg-primary/10 px-1.5 py-0.2 font-semibold text-primary">
-                        · {packSizeLabel.toLowerCase().includes("pc") ? packSizeLabel : `${packSizeLabel} (${packSizeKg} kg)`}
-                      </span>
+                      {kgOnly ? (
+                        <span className={cn("rounded px-1.5 py-0.2 font-semibold", (available?.(o) ?? 0) > 0 ? "bg-blue-500/10 text-blue-700 dark:text-blue-300" : "bg-muted text-muted-foreground")}>
+                          Grade B stock: {(available?.(o) ?? 0).toLocaleString("en-IN")} kg
+                        </span>
+                      ) : (
+                        <span className="rounded bg-primary/10 px-1.5 py-0.2 font-semibold text-primary">
+                          · {packSizeLabel.toLowerCase().includes("pc") ? packSizeLabel : `${packSizeLabel} (${packSizeKg} kg)`}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="shrink-0">
@@ -1809,7 +2020,7 @@ function ProductPicker({
             {lines.length > 0 && (
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold text-foreground tabular-nums">
-                  {Math.round(totalPackets * 10) / 10} {countUnit} · {totalQty.toLocaleString("en-IN")} kg
+                  {!kgOnly && `${Math.round(totalPackets * 10) / 10} ${countUnit} · `}{totalQty.toLocaleString("en-IN")} kg
                   {(pricing || sellingPricing) && ` · ${fmtMoney(totalAmount)}`}
                 </span>
                 <button
@@ -1830,8 +2041,8 @@ function ProductPicker({
                 <thead className="sticky top-0 z-10 bg-muted/80 backdrop-blur-xs text-left text-[11px] uppercase tracking-wide text-muted-foreground">
                   <tr>
                     <th className="px-2.5 py-2">#</th>
-                    <th className="px-2.5 py-2 min-w-[200px]">Product & Pack Spec</th>
-                    <th className="px-2.5 py-2 text-right">Packets / Count</th>
+                    <th className="px-2.5 py-2 min-w-[200px]">{kgOnly ? "Product · Grade B stock" : "Product & Pack Spec"}</th>
+                    {!kgOnly && <th className="px-2.5 py-2 text-right">Packets / Count</th>}
                     <th className="px-2.5 py-2 text-right">{grading ? "Input KG" : "Total KG"}</th>
                     {(pricing || sellingPricing) && (
                       <>
@@ -1896,6 +2107,12 @@ function ProductPicker({
                             {spec?.category && (
                               <span className="text-muted-foreground shrink-0">{spec.category} ·</span>
                             )}
+                            {kgOnly ? (
+                              <span className={cn("rounded-md px-2 py-0.5 font-bold", (available?.(l.p) ?? 0) >= l.q ? "bg-blue-500/10 text-blue-700 dark:text-blue-300" : "bg-destructive/10 text-destructive")}>
+                                Available: {(available?.(l.p) ?? 0).toLocaleString("en-IN")} kg
+                                {(available?.(l.p) ?? 0) < l.q && " · short"}
+                              </span>
+                            ) : (
                             <div className="relative inline-flex items-center">
                               <select
                                 aria-label={`${l.p} pack specification`}
@@ -1915,11 +2132,12 @@ function ProductPicker({
                               </select>
                               <ChevronDown className="pointer-events-none absolute right-1.5 size-3 text-primary opacity-70" />
                             </div>
+                            )}
                           </div>
                         </td>
 
                         {/* Packets / Count Input (Automatically calculates KG based on 250g / pack size) */}
-                        <td className="px-2.5 py-2 text-right">
+                        {!kgOnly && <td className="px-2.5 py-2 text-right">
                           <div className="inline-flex items-center justify-end gap-1">
                             <input
                               aria-label={`${l.p} packets count`}
@@ -1939,7 +2157,7 @@ function ProductPicker({
                               {isPcs ? "pcs" : "pkts"}
                             </span>
                           </div>
-                        </td>
+                        </td>}
 
                         {/* Total KG Input (Direct KG input, automatically reflects in packets count) */}
                         <td className="px-2.5 py-2 text-right">
@@ -2088,9 +2306,11 @@ function ProductPicker({
                     <td className="px-2.5 py-2" colSpan={2}>
                       {lines.length} {lines.length === 1 ? "product" : "products"}
                     </td>
-                    <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground font-medium">
-                      {Math.round(totalPackets * 10) / 10} {countUnit}
-                    </td>
+                    {!kgOnly && (
+                      <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground font-medium">
+                        {Math.round(totalPackets * 10) / 10} {countUnit}
+                      </td>
+                    )}
                     <td className="px-2.5 py-2 text-right tabular-nums font-bold text-foreground">
                       {totalQty.toLocaleString("en-IN")} kg
                     </td>

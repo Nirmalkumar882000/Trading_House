@@ -41,7 +41,7 @@ export function marketTripDemand(trip: Row, purchaseOrders: Row[]): number {
 
   const demandByProduct = new Map<string, number>();
   for (const po of purchaseOrders) {
-    if (po.status === 'Rejected') continue;
+    if (po.status === 'Rejected' || isGradeB(po)) continue; // Grade B is served from existing Grade B stock, not market buying.
     const orderLines = parseLines(po['item']);
     const totalBase = orderLines.reduce((sum, line) => sum + num(line.q), 0);
     const extraKg = num(po['extraKg']);
@@ -241,9 +241,42 @@ export function movements(data: Data): Movement[] {
   }
   for (const r of data['sales-orders'] || []) if (['Dispatched','Closed'].includes(r.status)) {
     const saleWh = String(r['warehouse'] || (data['packing'] || []).find(x => x.id === r['packing'])?.['warehouse'] || DEFAULT_WAREHOUSE);
-    for (const l of lines(r)) move(r,l,'Packed','Buyer',l.q,String(r['po']), saleWh);
+    for (const l of lines(r)) move(r,l,saleStockCategory(r),'Buyer',l.q,String(r['po']), saleWh);
   }
   return out;
+}
+// Grade A demand is packed before sale; Grade B demand is sold loose (KG) straight from Grade B inventory.
+export function isGradeB(r: Row | undefined): boolean { return r?.['grade'] === 'Grade B'; }
+export const saleStockCategory = (sale: Row): Category => isGradeB(sale) ? 'Grade B' : 'Packed';
+/** Grade B KG promised to Open/Confirmed Grade B sales that has not been dispatched (deducted) yet. */
+export function gradeBReserved(data: Data, product?: string): number {
+  return round((data['sales-orders'] || [])
+    .filter(sale => isGradeB(sale) && ['Open', 'Confirmed'].includes(sale.status))
+    .reduce((sum, sale) => sum + lines(sale).filter(l => !product || l.p.toLowerCase() === product.toLowerCase()).reduce((s, l) => s + l.q, 0), 0));
+}
+export function availableStock(data: Data, category: Category, product: string, warehouse?: string): number {
+  return Math.max(0, stock(data, warehouse).find(s => s.category === category && s.product.toLowerCase() === product.toLowerCase())?.qty || 0);
+}
+/** Warehouse holding the most Grade B KG for the given products, so a direct sale deducts where the stock is. */
+export function gradeBWarehouse(data: Data, products: string[]): string {
+  let best: string = DEFAULT_WAREHOUSE || ''; let bestQty = 0;
+  for (const wh of WAREHOUSES) {
+    const qty = products.reduce((s, p) => s + availableStock(data, 'Grade B', p, wh), 0);
+    if (qty > bestQty) { best = wh; bestQty = qty; }
+  }
+  return best;
+}
+/** Grade B buyer order → confirmed sales order capped to Grade B stock (no packing step). */
+export function directGradeBSale(po: Row, data: Data, saleId: string, date = new Date().toISOString().slice(0, 10)): Row {
+  const draft = populate('sales-orders', 'po', po.id, { id: saleId, status: 'Confirmed', date, buyer: String(po['buyer'] || ''), responsible: String(po['responsible'] || 'Ravi Kumar') } as Row, data);
+  const saleLines = lines(draft).filter(l => l.q > 0);
+  return normalize('sales-orders', {
+    ...draft,
+    item: JSON.stringify(saleLines),
+    qty: total(saleLines),
+    grade: 'Grade B',
+    warehouse: gradeBWarehouse(data, saleLines.map(l => l.p)),
+  });
 }
 export function stock(data: Data, warehouse?: string) {
   const map = new Map<string, { product: string; category: Category; qty: number; location: string; warehouse?: string }>();
@@ -422,11 +455,61 @@ export function draftInvoiceForSalesOrder(sale: Row, invoiceId: string, dispatch
     status: 'Draft',
   };
 }
+export type InvoiceReturnLine = { p: string; sentKg: number; returnKg: number; billedKg: number; rate: number; amount: number };
+export type InvoiceReturnSummary = { lines: InvoiceReturnLine[]; applied: boolean; returnKg: number; gross: number; returnValue: number; taxable: number; gst: number; tax: number; total: number };
+// Buyer rejects recorded on deliveries against the invoice's Sales DC, keyed by product.
+export function deliveryRejectsForDc(dc: unknown, deliveries: Row[]): Map<string, number> {
+  const rejects = new Map<string, number>();
+  if (!dc) return rejects;
+  for (const delivery of deliveries.filter(entry => entry['dc'] === dc)) {
+    for (const line of parseLines(delivery['item'])) {
+      if (num(line.rejectKg) > 0) rejects.set(line.p, round((rejects.get(line.p) || 0) + num(line.rejectKg)));
+    }
+  }
+  return rejects;
+}
+// Once applied, invoice lines carry sentQ (dispatched kg) and rejectKg, with q as the billed kg.
+export function invoiceReturnSummary(invoice: Row, deliveries: Row[], deduct = true): InvoiceReturnSummary {
+  const invoiceLines = parseLines(invoice['item']);
+  const applied = String(invoice['returnsApplied'] || '') === 'yes';
+  const rejects = applied || !deduct ? new Map<string, number>() : deliveryRejectsForDc(invoice['dc'], deliveries);
+  const fallbackRate = num(invoice['rate']);
+  const out = invoiceLines.map(line => {
+    const rate = num(line.saleRate ?? line.sellingPrice) || fallbackRate;
+    const sentKg = applied ? num(line.sentQ ?? line.q) : line.q;
+    const returnKg = applied ? num(line.rejectKg) : Math.min(sentKg, rejects.get(line.p) || 0);
+    const billedKg = applied ? line.q : round(sentKg - returnKg);
+    return { p: line.p, sentKg, returnKg, billedKg, rate, amount: Math.round(billedKg * rate) };
+  });
+  const gross = out.reduce((sum, line) => sum + Math.round(line.sentKg * line.rate), 0);
+  const taxable = out.length ? out.reduce((sum, line) => sum + line.amount, 0) : num(invoice['taxable']);
+  const gst = num(invoice['gst']);
+  const total = Math.round(taxable * (1 + gst / 100));
+  return { lines: out, applied, returnKg: round(out.reduce((sum, line) => sum + line.returnKg, 0)), gross, returnValue: Math.max(0, gross - taxable), taxable, gst, tax: total - taxable, total };
+}
+// Final buyer invoice: deducts delivery return KG from billed quantities and re-derives totals and payment status.
+export function finalInvoiceWithReturns(invoice: Row, deliveries: Row[]): Row {
+  const summary = invoiceReturnSummary(invoice, deliveries);
+  const original = parseLines(invoice['item']);
+  const item = summary.lines.map((line, index) => ({ ...original[index], p: line.p, q: line.billedKg, sentQ: line.sentKg, rejectKg: line.returnKg, saleRate: line.rate }));
+  const paid = num(invoice['paid']);
+  return {
+    ...invoice,
+    item: JSON.stringify(item),
+    taxable: summary.taxable,
+    total: summary.total,
+    returnKg: summary.returnKg,
+    returnValue: summary.returnValue,
+    returnsApplied: 'yes',
+    status: paid >= summary.total && summary.total > 0 ? 'Paid' : paid > 0 ? 'Part paid' : 'Issued',
+  };
+}
 export function buyerLocation(buyerName: string, buyers: Row[]): string {
   const buyer = buyers.find(entry => String(entry['name'] || '').toLowerCase() === buyerName.toLowerCase());
   return String(buyer?.['location'] || buyer?.['address'] || buyer?.['city'] || '');
 }
 export function normalize(slug: string, r: Row): Row {
+  if ((slug === 'purchase-orders' || slug === 'sales-orders') && !r['grade']) r = { ...r, grade: 'Grade A' };
   if (slug === 'trips' && r['buys']) {
     const buys = parseBuys(r['buys']); const merged = new Map<string, number>();
     for (const b of buys) if (b.p) merged.set(b.p, round((merged.get(b.p) || 0) + b.q));
@@ -757,7 +840,8 @@ export function populate(slug: string, key: string, value: string, form: Row, da
   if (slug === 'sales-orders' && key==='po') {
     const sold = (data['sales-orders'] || []).filter(x=>x.id!==form.id && x['po']===value);
     const others = { ...data, 'sales-orders': (data['sales-orders'] || []).filter(x=>x.id!==form.id) };
-    const packed = stock(others).filter(x=>x.category==='Packed');
+    const gradeB = isGradeB(ref);
+    const packed = stock(others).filter(x=>x.category===(gradeB ? 'Grade B' : 'Packed'));
     const savedPrices = data['supplier-prices'] || [];
     const trips = data['trips'] || [];
     const existingLines = lines(form);
@@ -769,9 +853,10 @@ export function populate(slug: string, key: string, value: string, form: Row, da
         ? num(existing?.saleRate)
         : supplierSellingPriceForProduct(l.p, trips, savedPrices);
       // Cap to packed stock when some is packed; otherwise start from the open demand so KG, packets and value are visible.
-      return { ...l, p:l.p, q:Math.max(0,avail > 0 ? Math.min(open,avail) : open), saleRate };
+      return { ...l, p:l.p, q:Math.max(0,gradeB ? Math.min(open,avail) : avail > 0 ? Math.min(open,avail) : open), saleRate };
     });
     const used = (p:string,size:number) => sold.reduce((t,x)=>t+(parsePacks(x['packs']).filter(k=>k.p===p&&k.size===size).reduce((a,k)=>a+k.bags+(k.loose>0?1:0),0)),0);
+    if (gradeB) return { ...r, buyer: ref['buyer'] || '', grade: 'Grade B', item: JSON.stringify(ls), qty: total(ls), bags: '', packs: '[]' };
     const packs: PackLine[] = [];
     for (const l of ls) {
       const pool = new Map<number,number>();
@@ -781,7 +866,7 @@ export function populate(slug: string, key: string, value: string, form: Row, da
       if (left>0) { const sz=[...sizes].reverse().find(z=>(avail.get(z)||0)>0&&z>left)||[...sizes].reverse().find(z=>(avail.get(z)||0)>0); if (sz) packs.push({p:l.p,size:sz,bags:0,loose:left}); else packs.push({p:l.p,size:0,bags:0,loose:left}); }
     }
     const bags = packsText(packs, ls);
-    r={...r,buyer:ref['buyer'] || '',item:JSON.stringify(ls),qty:total(ls),bags,packs:JSON.stringify(packs)};
+    r={...r,buyer:ref['buyer'] || '',grade:'Grade A',item:JSON.stringify(ls),qty:total(ls),bags,packs:JSON.stringify(packs)};
   }
   if (slug === 'packing' && key==='po') {
     const used = (data['packing'] || []).filter(x=>x.id!==form.id && x['po']===value);
@@ -962,6 +1047,7 @@ export function validateData(data: Data): string | null {
       if (slug==='packing') {
         if (num(r['packSize'])<=0) return 'Bag size must be greater than zero KG.';
         const po=(data['purchase-orders'] || []).find(x=>x.id===r['po']); if (r['po'] && (!po || po.status==='Rejected')) return 'Select an accepted buyer demand.';
+        if (isGradeB(po)) return `${r.id}: ${po?.id} is a Grade B order, sold in KG directly from Grade B inventory — create the sale without packing.`;
         if (po) for (const l of ls) {
           const allocated=(data['packing'] || []).filter(x=>x['po']===r['po']).reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0);
           const poLs = lines(po); const totalBase = poLs.reduce((s, x) => s + x.q, 0); const poLine = poLs.find(x => x.p === l.p);

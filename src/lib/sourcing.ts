@@ -1,4 +1,4 @@
-import { lines, stock, round, type Data } from './workflow';
+import { isGradeB, lines, stock, round, type Data } from './workflow';
 
 export function outstandingDemand(data: Data) {
   const map = new Map<string, { product: string; demand: number; sold: number; saleable: number; inPipeline: number; outstanding: number; buy: number }>();
@@ -9,7 +9,8 @@ export function outstandingDemand(data: Data) {
   };
 
   for (const r of data['purchase-orders'] || []) {
-    if (r.status !== 'Rejected') {
+    // Grade B orders are fulfilled from Grade B inventory, so they do not drive market purchasing.
+    if (r.status !== 'Rejected' && !isGradeB(r)) {
       const ls = lines(r);
       const totalQ = ls.reduce((s, l) => s + l.q, 0);
       const extra = Number(r['extraKg']) || 0;
@@ -52,7 +53,8 @@ export function outstandingDemand(data: Data) {
   }
 
   for (const r of data['sales-orders'] || []) {
-    if (['Dispatched', 'Closed'].includes(r.status)) {
+    // Grade B sales fulfil Grade B orders (excluded above), so they do not reduce market demand.
+    if (['Dispatched', 'Closed'].includes(r.status) && !isGradeB(r)) {
       for (const l of lines(r)) {
         get(l.p).sold += l.q;
       }

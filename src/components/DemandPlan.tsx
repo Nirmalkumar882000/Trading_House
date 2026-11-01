@@ -37,7 +37,7 @@ import {
 import { toast } from "sonner";
 import { ITEMS, PRODUCT_CATALOG, SUPPLIERS, BUYERS, type ModuleDef, type Row, type ProductItem } from "@/lib/modules";
 import { useStore } from "@/lib/store";
-import { parseLines, validateData, round, normalize, parseBuys } from "@/lib/workflow";
+import { isGradeB, parseLines, validateData, round, normalize, parseBuys } from "@/lib/workflow";
 import { Button } from "./ui/button";
 import { cn } from "@/lib/utils";
 
@@ -214,7 +214,7 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
   const availableDates = useMemo(() => {
     const datesMap = new Map<string, { count: number; totalKg: number; totalPackets: number }>();
     for (const po of data["purchase-orders"] ?? []) {
-      if (po.status === "Rejected") continue;
+      if (po.status === "Rejected" || isGradeB(po)) continue;
       const d = String(po["deliveryDate"] || po["date"] || "Prompt").trim();
       const qty = Number(po["qty"]) || 0;
       const lines = parseLines(po["item"]);
@@ -268,7 +268,8 @@ export function DemandPlan({ mod }: { mod: ModuleDef }) {
 
     // Buyer demand: every PO line, per buyer, excluding rejected POs
     for (const po of data["purchase-orders"] ?? []) {
-      if (po.status === "Rejected") continue;
+      // Grade B orders are fulfilled from Grade B inventory, so they are not part of the market purchase plan.
+      if (po.status === "Rejected" || isGradeB(po)) continue;
       const poOrderDate = String(po["date"] || "").trim();
       const poDeliveryDate = String(po["deliveryDate"] || "").trim();
       const targetDate = poDeliveryDate || poOrderDate || "Prompt";

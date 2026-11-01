@@ -7,6 +7,7 @@ const ref = (key:string,label:string): Field => ({key,label,type:'select',requir
 const date: Field = {key:'date',label:'Date',type:'date',list:true};
 const person: Field = {key:'responsible',label:'Purchase Manager',required:true};
 const common = {date:'2026-10-22',responsible:'Ravi Kumar'};
+const gradeA = {grade:'Grade A'};
 const item = (p:string,q:number,a?:number,a2?:number,b?:number) => JSON.stringify([{p,q,...(a===undefined?{}:{a,a2:a2||0,b:b||0})}]);
 // Demo multi-product sale (PO-1006) that reaches buyer delivery QC with per-product box counts.
 const multiProductSale = JSON.stringify([{p:'Amaranth Green Leaves (Arai Keerai)',q:25,saleRate:40,containerCount:4},{p:'Beans Broad (Avarakkaai)',q:20,saleRate:55,containerCount:3},{p:'Lady Finger (Vendikaai)',q:25,saleRate:42,containerCount:3}]);
@@ -15,14 +16,18 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
   'purchase-orders':{
     title:'Buyer - Purchase Order',
     description:'Buyer requirements by product and exact KG quantity.',
-    fields:[{key:'date',label:'Date',type:'date',list:true},ref('buyer','Buyer'),products,{key:'extraKg',label:'Extra KG',type:'number',suffix:'kg'},number('qty','Total demand',true),{key:'deliveryDate',label:'Delivery date',type:'date'}],    seed:[
-      {...common,buyer:'FreshMart Retail',item:item('Tomato',23),qty:23,status:'Accepted'},
-      {...common,buyer:'Hotel Saravana Bhavan',item:JSON.stringify([{p:'Tomato',q:50},{p:'Onion',q:100}]),qty:150,status:'Accepted'},
-      {...common,buyer:'Nilgiris Supermarket',item:item('Potato',100),extraKg:20,qty:120,status:'Accepted'},
-      {date:'2026-10-22',responsible:'Priya S',buyer:'Green Basket Stores',item:JSON.stringify([{p:'Carrot',q:60},{p:'Coriander',q:30}]),extraKg:0,qty:90,deliveryDate:'2026-10-23',status:'Accepted'},
-      {date:'2026-10-23',responsible:'Priya S',buyer:'Annapoorna Caterers',item:JSON.stringify([{p:'Cabbage',q:80},{p:'Onion',q:50}]),qty:130,deliveryDate:'2026-10-24',status:'Received'},
-      {date:'2026-10-24',responsible:'Ravi Kumar',buyer:'FreshMart Retail',item:JSON.stringify([{p:'Amaranth Green Leaves (Arai Keerai)',q:25},{p:'Beans Broad (Avarakkaai)',q:20},{p:'Lady Finger (Vendikaai)',q:25}]),extraKg:0,qty:70,deliveryDate:'2026-10-25',status:'Accepted'},
-      {date:'2026-10-24',responsible:'Priya S',buyer:'Nilgiris Supermarket',item:JSON.stringify([{p:'Amaranth Red Leaves (Red Mulai Keerai)',q:15},{p:'Banana Poovan Semi Ripe',q:25},{p:'Chilli Green Gundu (Bullet Chilli)',q:10}]),qty:50,deliveryDate:'2026-10-25',status:'Accepted'},
+    fields:[{key:'date',label:'Date',type:'date',list:true},ref('buyer','Buyer'),{key:'grade',label:'Order grade',type:'select',options:['Grade A','Grade B'],list:true},products,{key:'extraKg',label:'Extra KG',type:'number',suffix:'kg'},number('qty','Total demand',true),{key:'deliveryDate',label:'Delivery date',type:'date'}],    seed:[
+      {...gradeA,...common,buyer:'FreshMart Retail',item:item('Tomato',23),qty:23,status:'Accepted'},
+      {...gradeA,...common,buyer:'Hotel Saravana Bhavan',item:JSON.stringify([{p:'Tomato',q:50},{p:'Onion',q:100}]),qty:150,status:'Accepted'},
+      {...gradeA,...common,buyer:'Nilgiris Supermarket',item:item('Potato',100),extraKg:20,qty:120,status:'Accepted'},
+      {...gradeA,date:'2026-10-22',responsible:'Priya S',buyer:'Green Basket Stores',item:JSON.stringify([{p:'Carrot',q:60},{p:'Coriander',q:30}]),extraKg:0,qty:90,deliveryDate:'2026-10-23',status:'Accepted'},
+      {...gradeA,date:'2026-10-23',responsible:'Priya S',buyer:'Annapoorna Caterers',item:JSON.stringify([{p:'Cabbage',q:80},{p:'Onion',q:50}]),qty:130,deliveryDate:'2026-10-24',status:'Received'},
+      {...gradeA,date:'2026-10-24',responsible:'Ravi Kumar',buyer:'FreshMart Retail',item:JSON.stringify([{p:'Amaranth Green Leaves (Arai Keerai)',q:25},{p:'Beans Broad (Avarakkaai)',q:20},{p:'Lady Finger (Vendikaai)',q:25}]),extraKg:0,qty:70,deliveryDate:'2026-10-25',status:'Accepted'},
+      {...gradeA,date:'2026-10-24',responsible:'Priya S',buyer:'Nilgiris Supermarket',item:JSON.stringify([{p:'Amaranth Red Leaves (Red Mulai Keerai)',q:15},{p:'Banana Poovan Semi Ripe',q:25},{p:'Chilli Green Gundu (Bullet Chilli)',q:10}]),qty:50,deliveryDate:'2026-10-25',status:'Accepted'},
+      // Grade B demo: sold loose in KG from Grade B stock (QC Stage 2), no packing; excluded from market purchase planning.
+      {id:'PO-1008',date:'2026-10-25',responsible:'Priya S',buyer:'Annapoorna Caterers',grade:'Grade B',item:JSON.stringify([{p:'Tomato',q:8},{p:'Onion',q:4}]),qty:12,deliveryDate:'2026-10-26',status:'Converted'},
+      {id:'PO-1009',date:'2026-10-26',responsible:'Priya S',buyer:'Green Basket Stores',grade:'Grade B',item:JSON.stringify([{p:'Lady Finger (Vendikaai)',q:2},{p:'Amaranth Green Leaves (Arai Keerai)',q:2}]),qty:4,deliveryDate:'2026-10-27',status:'Converted'},
+      {id:'PO-1010',date:'2026-10-26',responsible:'Ravi Kumar',buyer:'Hotel Saravana Bhavan',grade:'Grade B',item:JSON.stringify([{p:'Tomato',q:10},{p:'Onion',q:5}]),qty:15,deliveryDate:'2026-10-27',status:'Accepted'},
     ]
   },
   trips:{
@@ -106,7 +111,7 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
   },
   'sales-orders':{
     description:'Set a selling price per product in ₹/KG. Each product line and the order total flow to invoices and buyer ledgers.',
-    fields:[date,ref('buyer','Buyer'),ref('po','Buyer demand'),{...products,label:'Products · KG & selling price / KG'},number('qty','Actual supply KG',true),{key:'rate',label:'Weighted average sale price / KG',type:'number',money:true,readOnly:true},{key:'value',label:'Sale value',type:'number',money:true,readOnly:true,list:true},person],
+    fields:[date,ref('buyer','Buyer'),{key:'grade',label:'Sale grade',type:'select',options:['Grade A','Grade B'],list:true},ref('po','Buyer demand'),{...products,label:'Products · KG & selling price / KG'},number('qty','Actual supply KG',true),{key:'rate',label:'Weighted average sale price / KG',type:'number',money:true,readOnly:true},{key:'value',label:'Sale value',type:'number',money:true,readOnly:true,list:true},person],
     compute:(r)=> {
       const saleLines = parseLines(r['item']);
       if (!saleLines.some(line => line.saleRate !== undefined)) {
@@ -121,6 +126,9 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
       {...common,packing:'PK-1002',po:'PO-1003',buyer:'Nilgiris Supermarket',item:item('Potato',100),qty:100,rate:100,value:10000,status:'Closed'},
       {date:'2026-10-22',responsible:'Ravi Kumar',packing:'PK-1003',po:'PO-1002',buyer:'Hotel Saravana Bhavan',item:item('Onion',40),qty:40,rate:38,value:1520,status:'Confirmed'},
       {date:'2026-10-25',responsible:'Ravi Kumar',packing:'PK-1004',po:'PO-1006',buyer:'FreshMart Retail',item:multiProductSale,status:'Dispatched'},
+      // Grade B sales: no packing record; dispatched stock is deducted from Grade B inventory.
+      {id:'SO-1005',date:'2026-10-26',responsible:'Priya S',po:'PO-1008',buyer:'Annapoorna Caterers',grade:'Grade B',warehouse:'Main Warehouse (Udumalaipet)',item:JSON.stringify([{p:'Tomato',q:8,saleRate:22},{p:'Onion',q:4,saleRate:20}]),qty:12,rate:21.33,value:256,status:'Dispatched'},
+      {id:'SO-1006',date:'2026-10-26',responsible:'Priya S',po:'PO-1009',buyer:'Green Basket Stores',grade:'Grade B',warehouse:'Pollachi Depot',item:JSON.stringify([{p:'Lady Finger (Vendikaai)',q:2,saleRate:25},{p:'Amaranth Green Leaves (Arai Keerai)',q:2,saleRate:20}]),qty:4,rate:22.5,value:90,status:'Confirmed'},
     ]
   },
   returns:{
@@ -129,7 +137,8 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
     fields:[date,ref('sale','Original sale'),{key:'salesDc',label:'Original Sales DC',readOnly:true,list:true},{key:'buyer',label:'Buyer',readOnly:true,list:true},{...products,label:'Products · sent, rejected & returned'},number('qty','Returned KG',true),{key:'boxes',label:'Returned boxes',type:'number',readOnly:true,list:true},{key:'reason',label:'Return reason',type:'select',options:['Quality issue','Excess supply','Wrong item'],required:true,list:true},person],
     seed:[
       {...common,delivery:'DLV-1001',sale:'SO-1001',salesDc:'SDC-1001',buyer:'FreshMart Retail',warehouse:'Main Warehouse (Udumalaipet)',item:JSON.stringify([{p:'Tomato',q:3,box:1,sentQ:23,sentBox:5,rejectKg:3,rejectBox:1}]),qty:3,boxes:1,reason:'Quality issue',status:'Received'},
-      {date:'2026-10-24',responsible:'Priya S',sale:'SO-1002',salesDc:'SDC-1002',buyer:'Nilgiris Supermarket',warehouse:'Pollachi Depot',item:JSON.stringify([{p:'Potato',q:2,box:1,sentQ:100,sentBox:10,rejectKg:0,rejectBox:0}]),qty:2,boxes:1,reason:'Excess supply',status:'Return DC created'}
+      {date:'2026-10-24',responsible:'Priya S',sale:'SO-1002',salesDc:'SDC-1002',buyer:'Nilgiris Supermarket',warehouse:'Pollachi Depot',item:JSON.stringify([{p:'Potato',q:2,box:1,sentQ:100,sentBox:10,rejectKg:0,rejectBox:0}]),qty:2,boxes:1,reason:'Excess supply',status:'Return DC created'},
+      {id:'RDC-1003',date:'2026-10-26',responsible:'Priya S',delivery:'DLV-1003',sale:'SO-1005',salesDc:'SDC-1005',buyer:'Annapoorna Caterers',warehouse:'Main Warehouse (Udumalaipet)',item:JSON.stringify([{p:'Tomato',q:1,sentQ:8,sentBox:2,rejectKg:1,rejectBox:0}]),qty:1,boxes:0,reason:'Quality issue',status:'Return DC created'},
     ]
   },
   dispatch:{
@@ -141,6 +150,7 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
       {...common,so:'SO-1002',buyer:'Nilgiris Supermarket',toLocation:'Pollachi',warehouse:'Pollachi Depot',item:item('Potato',100),qty:100,transporter:'Pollachi Express Cargo',vehicle:'TN 41 CD 5678',driver:'Ganesh',charges:450,status:'Delivered'},
       {date:'2026-10-24',responsible:'Ravi Kumar',so:'SO-1003',buyer:'Hotel Saravana Bhavan',toLocation:'Coimbatore',warehouse:'Main Warehouse (Udumalaipet)',item:item('Onion',40),qty:40,transporter:'Anamalai Roadways',vehicle:'TN 39 EF 9012',driver:'Suresh',charges:300,status:'In transit'},
       {date:'2026-10-25',responsible:'Ravi Kumar',so:'SO-1004',buyer:'FreshMart Retail',toLocation:'Udumalaipet',warehouse:'Pollachi Depot',item:multiProductSale,qty:70,containerType:'Plastic crates',containerCount:10,transporter:'Kongu Agri Logistics',vehicle:'TN 78 AB 1234',driver:'Raja',charges:350,status:'Delivered'},
+      {id:'SDC-1005',date:'2026-10-26',responsible:'Priya S',so:'SO-1005',buyer:'Annapoorna Caterers',toLocation:'Tiruppur',warehouse:'Main Warehouse (Udumalaipet)',item:JSON.stringify([{p:'Tomato',q:8,box:2},{p:'Onion',q:4,box:1}]),qty:12,containerType:'Plastic crates',containerCount:3,transporter:'Kongu Agri Logistics',vehicle:'TN 78 AB 1234',driver:'Raja',charges:150,status:'Delivered'},
     ]
   },
   deliveries:{
@@ -149,14 +159,17 @@ export function configureModules(base: ModuleDef[], items: string[]): ModuleDef[
     seed:[
       {dc:'SDC-1001',returnRef:'RDC-1001',buyer:'FreshMart Retail',item:JSON.stringify([{p:'Tomato',q:23,box:5,rejectKg:3,rejectBox:1}]),remarks:'3 kg soft/damaged in transit',status:'Signed'},
       {dc:'SDC-1002',buyer:'Nilgiris Supermarket',item:JSON.stringify([{p:'Potato',q:100,box:10,rejectKg:0,rejectBox:0}]),remarks:'Delivered in full, grade verified',status:'Signed'},
+      {id:'DLV-1003',date:'2026-10-26',responsible:'Priya S',dc:'SDC-1005',returnRef:'RDC-1003',buyer:'Annapoorna Caterers',item:JSON.stringify([{p:'Tomato',q:8,box:2,rejectKg:1,rejectBox:0},{p:'Onion',q:4,box:1,rejectKg:0,rejectBox:0}]),accepted:11,issueQty:1,boxes:3,rejectBoxes:0,remarks:'Grade B lot accepted; 1 kg tomato over-soft',status:'QC issue'},
     ]
   },
   invoices:{
     description:'Sales invoice values and product-level selling rates copied from the linked sales order; no second stock deduction.',
-    fields:[{key:'so',label:'Sales order',type:'select',list:true},{key:'dc',label:'Sales DC',type:'select',list:true},{key:'buyer',label:'Buyer',type:'text',readOnly:true,list:true},date,{key:'item',label:'Products & selling price / KG',type:'products',readOnly:true,list:true},{key:'taxable',label:'Taxable value',type:'number',money:true,readOnly:true},{key:'gst',label:'GST %',type:'select',options:['0','5','12','18']},{key:'total',label:'Invoice total',type:'number',money:true,readOnly:true,list:true},{key:'paid',label:'Received',type:'number',money:true,list:true}],
+    fields:[{key:'so',label:'Sales order',type:'select',list:true},{key:'dc',label:'Sales DC',type:'select',list:true},{key:'buyer',label:'Buyer',type:'text',readOnly:true,list:true},date,{key:'item',label:'Products & selling price / KG',type:'products',readOnly:true,list:true},{key:'taxable',label:'Taxable value',type:'number',money:true,readOnly:true},{key:'gst',label:'GST %',type:'select',options:['0','5','12','18']},{key:'total',label:'Invoice total',type:'number',money:true,readOnly:true,list:true},{key:'returnKg',label:'Buyer return',type:'number',readOnly:true,list:true,suffix:'kg'},{key:'payable',label:'Buyer amount (after returns)',type:'number',money:true,readOnly:true,list:true},{key:'paid',label:'Received',type:'number',money:true,list:true}],
     seed:[
       {so:'SO-1001',dc:'SDC-1001',buyer:'FreshMart Retail',date:'2026-10-22',item:item('Tomato',23),taxable:966,gst:'0',total:966,paid:840,status:'Part paid'},
       {so:'SO-1002',dc:'SDC-1002',buyer:'Nilgiris Supermarket',date:'2026-10-22',item:item('Potato',100),taxable:10000,gst:'0',total:10000,paid:10000,status:'Paid'},
+      // Grade B proforma: the 1 kg buyer reject on DLV-1003 is deducted when the final invoice is created.
+      {id:'INV-1003',so:'SO-1005',dc:'SDC-1005',buyer:'Annapoorna Caterers',date:'2026-10-26',item:JSON.stringify([{p:'Tomato',q:8,saleRate:22},{p:'Onion',q:4,saleRate:20}]),rate:21.33,taxable:256,gst:'0',total:256,paid:0,status:'Draft'},
     ]
   },
   'supplier-prices':{
