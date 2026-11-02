@@ -43,20 +43,23 @@ export function shareInvoiceOnWhatsApp(invoice: Row, summary: InvoiceReturnSumma
 export function InvoiceViewModal({
   invoice,
   deliveries = [],
+  returns = [],
   buyerPhone,
   onCreateInvoice,
   onClose,
 }: {
   invoice: Row;
   deliveries?: Row[];
+  /** Return DCs raised against the invoice's sales order (deducted like delivery rejects). */
+  returns?: Row[];
   buyerPhone?: string | undefined;
   onCreateInvoice?: ((invoice: Row) => void) | undefined;
   onClose: () => void;
 }) {
-  const pendingReturns = invoiceReturnSummary(invoice, deliveries);
+  const pendingReturns = invoiceReturnSummary(invoice, deliveries, true, returns);
   const hasPendingReturns = !pendingReturns.applied && pendingReturns.returnKg > 0;
   const [deductReturns, setDeductReturns] = useState(true);
-  const summary = invoiceReturnSummary(invoice, deliveries, deductReturns);
+  const summary = invoiceReturnSummary(invoice, deliveries, deductReturns, returns);
   const showReturns = summary.returnKg > 0;
   const paid = num(invoice["paid"]);
   const isProforma = invoice.status === "Draft";

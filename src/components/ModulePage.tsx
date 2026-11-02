@@ -40,6 +40,8 @@ function getCreateButtonLabel(slug: string, title: string): string {
   if (slug === "receipts") return "New GRN";
   if (slug === "containers") return "New Returnable";
   if (slug === "transport") return "New Movement";
+  if (slug === "invoices") return "New Invoice";
+  if (slug === "returns") return "New Return DC";
   return `New ${(title.split(" ")[0] ?? "").replace(/s$/, "")}`;
 }
 
@@ -253,7 +255,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
           saleRate: line.saleRate ?? saleLines.find((saleLine) => saleLine.p === line.p)?.saleRate ?? saleRate,
         })));
         const withSale = { ...invoice, so: sale.id, item, rate: saleRate, grade: sale["grade"] || "Grade A" };
-        const summary = invoiceReturnSummary(withSale, deliveries);
+        const summary = invoiceReturnSummary(withSale, deliveries, true, data["returns"] ?? []);
         return { ...withSale, returnKg: summary.returnKg, payable: summary.total };
       });
     }
@@ -331,7 +333,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
   // Converts a proforma (or an issued invoice with pending buyer returns) into the final buyer invoice.
   const createFinalInvoice = (invoice: Row) => {
     const stored = (data["invoices"] ?? []).find((entry) => entry.id === invoice.id);
-    const issued = finalInvoiceWithReturns({ ...stored, ...invoice }, data["deliveries"] ?? []);
+    const issued = finalInvoiceWithReturns({ ...stored, ...invoice }, data["deliveries"] ?? [], data["returns"] ?? []);
     const { payable: _payable, ...persisted } = issued;
     upsert("invoices", persisted as Row);
     setInvoiceViewRow((current) => (current?.id === issued.id ? ({ ...issued, payable: num(issued["total"]) } as Row) : current));
@@ -387,6 +389,8 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
     upsert(mod.slug, full);
     setEditing(null);
     toast.success(`${full.id} ${isNew ? "created" : "updated"}`);
+    // A new Return DC goes straight to its printable challan.
+    if (mod.slug === "returns" && isNew) setReturnDcPrintRow({ ...full, __delivery: String(full["delivery"] || "") });
     if (mod.slug === "purchase-orders") {
       const nextData = { ...data, [mod.slug]: isNew ? [...rows, full] : rows.map((x) => (x.id === full.id ? full : x)) };
       const waiting = gradeBWaiting(nextData, full);
@@ -892,7 +896,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                             variant="ghost"
                             title="Share invoice with buyer via WhatsApp"
                             aria-label={`Share invoice ${r.id} on WhatsApp`}
-                            onClick={() => shareInvoiceOnWhatsApp(r, invoiceReturnSummary(r, data["deliveries"] ?? []), buyerPhone(r["buyer"]))}
+                            onClick={() => shareInvoiceOnWhatsApp(r, invoiceReturnSummary(r, data["deliveries"] ?? [], true, data["returns"] ?? []), buyerPhone(r["buyer"]))}
                             className="rounded-md p-1.5 text-emerald-600 hover:bg-emerald-500/10"
                           >
                             <MessageCircle className="size-4" />
@@ -955,6 +959,11 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                           className="rounded-md p-1.5 text-primary hover:bg-primary-soft"
                         >
                           <Eye className="size-4" />
+                        </Button>
+                      )}
+                      {mod.slug === "returns" && (
+                        <Button variant="ghost" title={`Print Return DC ${r.id}`} onClick={() => setReturnDcPrintRow({ ...r, __delivery: String(r["delivery"] || "") })} className="rounded-md p-1.5 text-primary hover:bg-primary-soft">
+                          <Printer className="size-4" />
                         </Button>
                       )}
                       {r.status !== mod.statuses.at(-1) && (
@@ -1038,6 +1047,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
         <InvoiceViewModal
           invoice={invoiceViewRow}
           deliveries={data["deliveries"] ?? []}
+          returns={data["returns"] ?? []}
           buyerPhone={buyerPhone(invoiceViewRow["buyer"])}
           onCreateInvoice={createFinalInvoice}
           onClose={() => setInvoiceViewRow(null)}
@@ -1055,7 +1065,8 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
       )}
 
       {returnDcPrintRow && (() => {
-        const delivery = rows.find((entry) => entry.id === returnDcPrintRow["__delivery"]);
+        // Opened from Deliveries or from Sales returns, so look the delivery up in the full data set.
+        const delivery = (data["deliveries"] ?? []).find((entry) => entry.id === returnDcPrintRow["__delivery"]);
         const dispatch = (data["dispatch"] ?? []).find((entry) => entry.id === (returnDcPrintRow["salesDc"] || delivery?.["dc"]));
         return <ReturnDcPrintModal returnDc={returnDcPrintRow} delivery={delivery} dispatch={dispatch} onClose={() => setReturnDcPrintRow(null)} />;
       })()}

@@ -537,11 +537,25 @@ export function deliveryRejectsForDc(dc: unknown, deliveries: Row[]): Map<string
   }
   return rejects;
 }
+/**
+ * Buyer return KG per product for an invoice: delivery rejects on its Sales DC, plus Return DCs raised directly
+ * against its sales order. Return DCs generated from a delivery on this Sales DC are skipped — that delivery reject already counts them.
+ */
+export function invoiceReturnsByProduct(invoice: Row, deliveries: Row[], returns: Row[] = []): Map<string, number> {
+  const rejects = deliveryRejectsForDc(invoice['dc'], deliveries);
+  const fromDeliveries = new Set(deliveries.filter(entry => invoice['dc'] && entry['dc'] === invoice['dc']).map(entry => entry.id));
+  for (const ret of returns) {
+    if (!invoice['so'] || ret['sale'] !== invoice['so']) continue;
+    if (fromDeliveries.has(String(ret['delivery'] || ''))) continue;
+    for (const line of parseLines(ret['item'])) if (line.q > 0) rejects.set(line.p, round((rejects.get(line.p) || 0) + line.q));
+  }
+  return rejects;
+}
 // Once applied, invoice lines carry sentQ (dispatched kg) and rejectKg, with q as the billed kg.
-export function invoiceReturnSummary(invoice: Row, deliveries: Row[], deduct = true): InvoiceReturnSummary {
+export function invoiceReturnSummary(invoice: Row, deliveries: Row[], deduct = true, returns: Row[] = []): InvoiceReturnSummary {
   const invoiceLines = parseLines(invoice['item']);
   const applied = String(invoice['returnsApplied'] || '') === 'yes';
-  const rejects = applied || !deduct ? new Map<string, number>() : deliveryRejectsForDc(invoice['dc'], deliveries);
+  const rejects = applied || !deduct ? new Map<string, number>() : invoiceReturnsByProduct(invoice, deliveries, returns);
   const fallbackRate = num(invoice['rate']);
   const out = invoiceLines.map(line => {
     const rate = num(line.saleRate ?? line.sellingPrice) || fallbackRate;
@@ -557,8 +571,8 @@ export function invoiceReturnSummary(invoice: Row, deliveries: Row[], deduct = t
   return { lines: out, applied, returnKg: round(out.reduce((sum, line) => sum + line.returnKg, 0)), gross, returnValue: Math.max(0, gross - taxable), taxable, gst, tax: total - taxable, total };
 }
 // Final buyer invoice: deducts delivery return KG from billed quantities and re-derives totals and payment status.
-export function finalInvoiceWithReturns(invoice: Row, deliveries: Row[]): Row {
-  const summary = invoiceReturnSummary(invoice, deliveries);
+export function finalInvoiceWithReturns(invoice: Row, deliveries: Row[], returns: Row[] = []): Row {
+  const summary = invoiceReturnSummary(invoice, deliveries, true, returns);
   const original = parseLines(invoice['item']);
   const item = summary.lines.map((line, index) => ({ ...original[index], p: line.p, q: line.billedKg, sentQ: line.sentKg, rejectKg: line.returnKg, saleRate: line.rate }));
   const paid = num(invoice['paid']);

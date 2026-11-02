@@ -43,3 +43,21 @@ describe('Sales invoice buyer returns', () => {
     expect(finalInvoiceWithReturns({ ...draft, status: 'Part paid', paid: 5300 }, deliveries).status).toBe('Paid');
   });
 });
+
+describe('Return DCs raised directly against a sales order', () => {
+  const invoice: Row = { id: 'INV-9', status: 'Issued', so: 'SO-9', dc: '', gst: '0', paid: 0, rate: 0, item: JSON.stringify([{ p: 'Cabbage', q: 400, saleRate: 20 }, { p: 'Beetroot', q: 150, saleRate: 20 }]) };
+  const returns: Row[] = [{ id: 'RDC-9', status: 'Return DC created', sale: 'SO-9', item: JSON.stringify([{ p: 'Cabbage', q: 3 }, { p: 'Beetroot', q: 5 }]) }];
+
+  it('deducts the returned KG and its value from the invoice even without a Sales DC', () => {
+    const summary = invoiceReturnSummary(invoice, [], true, returns);
+    expect(summary.returnKg).toBe(8);
+    expect(summary.gross).toBe(11000);
+    expect(summary.total).toBe(11000 - 8 * 20);
+    expect(finalInvoiceWithReturns(invoice, [], returns)['total']).toBe(10840);
+  });
+
+  it('does not double count a Return DC generated from a delivery on the same Sales DC', () => {
+    const fromDelivery: Row[] = [{ id: 'RDC-7', status: 'Return DC created', sale: 'SO-7', delivery: 'DLV-1', item: JSON.stringify([{ p: 'Tomato', q: 5 }]) }];
+    expect(invoiceReturnSummary({ ...draft, so: 'SO-7' }, deliveries, true, fromDelivery).returnKg).toBe(5);
+  });
+});

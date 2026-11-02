@@ -96,7 +96,8 @@ const returnReceiptLines = (record: Row): GRNLine[] =>
       sentQ: line.q,
       q: line.q,
       containerType: String(line.containerType || def.type),
-      containerCount: num(line.containerCount) || def.count,
+      // Boxes returned on the Return DC (line.box) — not a weight-based guess.
+      containerCount: num(line.containerCount) || num(line.box) || def.count,
       packKg: spec?.packSizeKg || 0.5,
       packLabel: spec?.defaultPackSize || "500 g",
       category: spec?.category || "Produce",
@@ -572,14 +573,21 @@ export function WarehouseReceiptDialog({
         status: "Received",
         warehouse,
         responsible,
-        item: JSON.stringify(linesState.map((line) => ({
+        // Keep the Return DC line context (sent/rejected boxes); boxes received become the returned box count.
+        item: JSON.stringify(linesState.map((line) => {
+          const original = lines(selectedReturn).find((entry) => entry.p === line.p);
+          return {
+          ...original,
           p: line.p,
           q: line.q,
-          sentQ: line.sentQ,
+          // Original Sales DC kg stays as "sent"; the receipt compares against the Return DC kg on screen only.
+          sentQ: original?.sentQ ?? line.sentQ,
           containerType: line.containerType,
           containerCount: line.containerCount,
+          box: line.containerCount,
           reason: line.reason,
-        }))),
+          };
+        })),
       });
       const error = validateData({
         ...data,
