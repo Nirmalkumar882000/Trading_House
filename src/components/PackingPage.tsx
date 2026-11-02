@@ -39,8 +39,12 @@ import {
   validateData,
   bagBreakdown,
   parseLines,
+  isGradeB,
+  gradeBCommitted,
+  gradeBFree,
   type Data,
 } from "@/lib/workflow";
+import { Link } from "@tanstack/react-router";
 
 export interface BagSizeOption {
   label: string;
@@ -138,7 +142,7 @@ type Tab = {
 const TABS: Tab[] = [
   { key: "s1a", label: "Stage 1 · Grade A", stage: "Stage 1", grade: "Grade A" },
   { key: "s2a", label: "Stage 2 · Grade A", stage: "Stage 2", grade: "Grade A" },
-  { key: "s2b", label: "Stage 2 · Grade B", stage: "Stage 2", grade: "Grade B" },
+  { key: "s2b", label: "Stage 2 · Grade B · Direct sale", stage: "Stage 2", grade: "Grade B" },
   { key: "rej", label: "Rejected", stage: "Reject", grade: "Rejected" },
 ];
 
@@ -234,10 +238,12 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
     packRows.reduce((s, r) => s + (lines(r).find((l) => l.p === p)?.q ?? 0), 0);
   const products = [...graded(data, tab).entries()];
   const isReject = tab.stage === "Reject";
+  const isDirectSale = tab.grade === "Grade B";
 
   // Buyer Allocations: Demand vs Actual based on Product Packaging (Packets & Grams)
   const buyerAllocations = useMemo(() => {
-    const pos = (data["purchase-orders"] ?? []).filter((r) => r.status !== "Rejected");
+    // Grade B orders are sold loose by KG straight from Grade B stock, so they never need packing.
+    const pos = (data["purchase-orders"] ?? []).filter((r) => r.status !== "Rejected" && !isGradeB(r));
     const packingRecords = data["packing"] ?? [];
 
     const items: Array<{
@@ -1001,7 +1007,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
               })}
             </div>
 
-            {!isReject && (
+            {!isReject && !isDirectSale && (
               <div className="min-w-64 max-w-sm">
                 <EmployeeSelect
                   multiple
@@ -1015,7 +1021,53 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
             )}
           </div>
 
-          {/* Table 1: Graded Produce Table with Sticky Product Column */}
+          {/* Grade B: no bag packing — sold loose by KG through a direct sale on the buyer order */}
+          {isDirectSale ? (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-500/30 bg-blue-500/10 p-4">
+                <div>
+                  <h3 className="text-sm font-bold text-foreground">Grade B · Direct Sale (no packing)</h3>
+                  <p className="text-xs text-muted-foreground">
+                    Grade B produce is sold loose by KG. Raise a Grade B buyer order and use "New Sale" — stock is booked first come, first served.
+                  </p>
+                </div>
+                <Link
+                  to="/m/$module"
+                  params={{ module: "purchase-orders" }}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                >
+                  Go to Grade B buyer orders <ArrowRight className="size-3.5" />
+                </Link>
+              </div>
+              <div className="overflow-x-auto rounded-xl border bg-card shadow-sm">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted/70 text-xs uppercase text-muted-foreground">
+                    <tr>
+                      <th className="px-4 py-3 text-left">Product</th>
+                      <th className="px-4 py-3 text-right">Graded KG</th>
+                      <th className="px-4 py-3 text-right">Booked for buyers</th>
+                      <th className="px-4 py-3 text-right">Free for direct sale</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {products.map(([p, q]) => (
+                      <tr key={p} className="border-t">
+                        <td className="px-4 py-3 font-medium">{p}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{kg(q)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums text-amber-700">{kg(gradeBCommitted(data, p))}</td>
+                        <td className="px-4 py-3 text-right font-semibold tabular-nums text-emerald-700">{kg(gradeBFree(data, p))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {!products.length && (
+                  <p className="p-8 text-center text-sm text-muted-foreground">
+                    No Grade B stock yet. Complete Stage 2 in Quality Check.
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
           <div className="overflow-x-auto rounded-xl border bg-card shadow-sm">
             <table className="w-full text-sm">
               <thead className="bg-muted/70 text-xs uppercase text-muted-foreground sticky top-0 z-20">
@@ -1414,6 +1466,7 @@ export function PackingPage({ mod }: { mod: ModuleDef }) {
               </p>
             )}
           </div>
+          )}
         </div>
       )}
 

@@ -42,6 +42,7 @@ function getCreateButtonLabel(slug: string, title: string): string {
   if (slug === "transport") return "New Movement";
   if (slug === "invoices") return "New Invoice";
   if (slug === "returns") return "New Return DC";
+  if (slug === "supplier-prices") return "New Supplier Price";
   return `New ${(title.split(" ")[0] ?? "").replace(/s$/, "")}`;
 }
 
