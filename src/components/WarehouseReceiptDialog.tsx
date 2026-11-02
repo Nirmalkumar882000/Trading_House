@@ -85,7 +85,7 @@ interface GRNLine {
   reason: string;
 }
 
-const returnReceiptLines = (record: Row): GRNLine[] =>
+export const returnReceiptLines = (record: Row): GRNLine[] =>
   lines(record).map((line) => {
     const spec = PRODUCT_CATALOG.find(
       (product) => product.name.toLowerCase() === line.p.toLowerCase()
@@ -96,8 +96,9 @@ const returnReceiptLines = (record: Row): GRNLine[] =>
       sentQ: line.q,
       q: line.q,
       containerType: String(line.containerType || def.type),
-      // Boxes returned on the Return DC (line.box) — not a weight-based guess.
-      containerCount: num(line.containerCount) || num(line.box) || def.count,
+      // Boxes returned on the Return DC (line.box) win over the containerCount
+      // copied from the original packing/delivery line or a weight-based guess.
+      containerCount: num(line.box) || num(line.containerCount) || def.count,
       packKg: spec?.packSizeKg || 0.5,
       packLabel: spec?.defaultPackSize || "500 g",
       category: spec?.category || "Produce",
