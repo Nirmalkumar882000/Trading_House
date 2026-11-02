@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MODULES, seedRows, type Row } from '@/lib/modules';
-import { availableStock, directGradeBSale, gradeBReserved, marketTripDemand, normalize, populate, stock, validateData, type Data } from '@/lib/workflow';
+import { availableStock, directGradeBSale, gradeBFree, gradeBReserved, marketTripDemand, normalize, populate, stock, validateData, type Data } from '@/lib/workflow';
 import { outstandingDemand } from '@/lib/sourcing';
 
 const demo = (): Data => Object.fromEntries(MODULES.map(m => [m.slug, seedRows(m)]));
@@ -13,7 +13,7 @@ describe('Grade B buyer orders', () => {
     expect(normalize('purchase-orders', { id: 'PO-1', status: 'Received' })['grade']).toBe('Grade A');
   });
 
-  it('caps a direct sale to Grade B inventory without packing', () => {
+  it('caps a direct sale to free Grade B inventory (first come, first served) without packing', () => {
     const d = withOrder();
     const gradeBTomato = availableStock(d, 'Grade B', 'Tomato');
     expect(gradeBTomato).toBeGreaterThan(0);
@@ -21,7 +21,9 @@ describe('Grade B buyer orders', () => {
     expect(sale['grade']).toBe('Grade B');
     expect(sale['buyer']).toBe('Annapoorna Caterers');
     const tomato = JSON.parse(String(sale['item'])).find((l: { p: string }) => l.p === 'Tomato');
-    expect(tomato.q).toBe(Math.min(30, gradeBTomato));
+    // PO-9301 (25 Oct) is booked before open order PO-1010 (26 Oct), so it is served first from the whole stock.
+    expect(tomato.q).toBe(Math.min(30, gradeBFree(d, 'Tomato', { po: 'PO-9301' })));
+    expect(tomato.q).toBe(gradeBTomato);
   });
 
   it('deducts Grade B stock (not packed stock) when the sale is dispatched', () => {

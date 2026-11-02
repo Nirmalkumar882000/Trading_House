@@ -32,7 +32,7 @@ import { cn } from "@/lib/utils";
 import { outstandingDemand } from "@/lib/sourcing";
 import { Button } from "./ui/button";
 import { EmployeeSelect } from "./EmployeeSelect";
-import { availableStock, bagBreakdown, buyerLocation, directGradeBSale, gradeBReserved, isGradeB, buysFromTrip, draftInvoiceForSalesOrder, finalInvoiceWithReturns, invoiceReturnSummary,invoiceForSalesOrder, marketTripDemand, parseBuys, returnsAvailable, returnFromDelivery, RETURN_OPEN_STATUSES, lines, normalize, num, parseLines, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, syncReceiptDownstream, total, validateData, round, type ProductLine } from "@/lib/workflow";
+import { availableStock, bagBreakdown, buyerLocation, directGradeBSale, gradeBBookingError, gradeBFree, gradeBQueue, gradeBReserved, gradeBWaiting, isGradeB, type GradeBBooking, buysFromTrip, draftInvoiceForSalesOrder, finalInvoiceWithReturns, invoiceReturnSummary,invoiceForSalesOrder, marketTripDemand, parseBuys, returnsAvailable, returnFromDelivery, RETURN_OPEN_STATUSES, lines, normalize, num, parseLines, populate, referenceModule, stock, supplierPricesFromTrips, supplierSellingPriceForProduct, syncReceiptDownstream, total, validateData, round, type ProductLine } from "@/lib/workflow";
 export { parseLines } from "@/lib/workflow";
 
 function getCreateButtonLabel(slug: string, title: string): string {
@@ -44,8 +44,36 @@ function getCreateButtonLabel(slug: string, title: string): string {
 }
 
 type Line = ProductLine;
+/** "YYYY-MM-DD" is read as a local calendar date (not UTC midnight); full ISO timestamps keep their time. */
+const toDate = (v: unknown) => {
+  const s = String(v || "");
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T00:00:00`) : new Date(s);
+  return s && !Number.isNaN(d.getTime()) ? d : null;
+};
+const fmtDate = (v: unknown) => toDate(v)?.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) ?? String(v || "—");
+const fmtTime = (v: unknown) => toDate(v)?.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true }) ?? "";
+const fmtDateTime = (v: unknown) => (String(v || "").includes("T") ? `${fmtDate(v)} · ${fmtTime(v)}` : fmtDate(v));
+/** Table date cell: business date, with the time the record was entered (or booked, for Grade B orders) underneath. */
+function DateTimeCell({ date, at }: { date: unknown; at: unknown }) {
+  if (!date && !at) return <span className="text-muted-foreground">—</span>;
+  const entered = toDate(at);
+  const sameDay = entered && toDate(date)?.toDateString() === entered.toDateString();
+  return (
+    <div className="whitespace-nowrap leading-tight">
+      <span className="font-medium text-foreground">{date ? fmtDate(date) : fmtDate(at)}</span>
+      {String(date || "").includes("T") ? (
+        <span className="block text-[11px] text-muted-foreground">{fmtTime(date)}</span>
+      ) : entered ? (
+        <span className="block text-[11px] text-muted-foreground" title={`Entered ${fmtDateTime(at)}`}>
+          {sameDay || !date ? fmtTime(at) : `entered ${fmtDateTime(at)}`}
+        </span>
+      ) : null}
+    </div>
+  );
+}
 const fmt = (f: Field, v: unknown, role: UserRole) => {
   if (v === undefined || v === "") return "—";
+  if (f.type === "date") return fmtDateTime(v);
   if ((f.money || f.key === "rate" || f.key === "amount" || f.key === "payable") && !canViewPrice(role)) {
     return "•••• (Restricted)";
   }
@@ -263,8 +291,10 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
     const ls = parseLines(r["item"]);
     const extraKg = Number(r["extraKg"]) || 0;
     const baseQty = ls.reduce((s, l) => s + (Number(l.q) || 0), 0);
+    const kgOnly = isGradeB(r);
     const bText = ls
       .map((l) => {
+        if (kgOnly) return `• *${l.p}*: ${l.q} kg`;
         const spec =
           PRODUCT_CATALOG.find((item) => item.name.toLowerCase() === l.p.toLowerCase()) ||
           PRODUCT_CATALOG.find((item) => item.name.toLowerCase().includes(l.p.toLowerCase())) ||
@@ -284,7 +314,8 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
       `*Date:* ${r["date"]}\n` +
       `*Delivery Date:* ${r["deliveryDate"] || "Prompt"}\n` +
       `*Status:* ${r.status}\n\n` +
-      `*Demand in Packets & Count:*\n${bText}${extraSummary}\n\n` +
+      (kgOnly ? `*Grade:* Grade B (loose KG)\n\n*Demand in KG:*\n` : `*Demand in Packets & Count:*\n`) +
+      `${bText}${extraSummary}\n\n` +
       `*Total Demand:* ${r["qty"]} kg\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `_Purchase Manager, please arrange market procurement and truck loading._`;
@@ -313,14 +344,16 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
   const createGradeBSale = (po: Row, saleLines: ProductLine[]) => {
     const draft = directGradeBSale(po, data, nextId("sales-orders"));
     const sale = normalize("sales-orders", { ...draft, item: JSON.stringify(saleLines), qty: total(saleLines) });
-    const err = validateData({ ...data, "sales-orders": [...(data["sales-orders"] ?? []), sale] });
+    const err = gradeBBookingError(data, "sales-orders", sale) || validateData({ ...data, "sales-orders": [...(data["sales-orders"] ?? []), sale] });
     if (err) { toast.error(err); return; }
     upsert("sales-orders", sale);
     const invoice = draftInvoiceForSalesOrder(sale, nextId("invoices"), data["dispatch"] ?? []);
     upsert("invoices", invoice);
-    upsert("purchase-orders", { ...po, status: "Converted" });
+    // Partly sold: the order stays open so the rest keeps its place in the Grade B queue.
+    const remaining = gradeBWaiting({ ...data, "sales-orders": [...(data["sales-orders"] ?? []), sale] }, po);
+    if (!remaining.length) upsert("purchase-orders", { ...po, status: "Converted" });
     setGradeBSaleRow(null);
-    toast.success(`${sale.id} created from Grade B stock (${num(sale["qty"])} kg · ${fmtMoney(sale["value"])}) · PROF-${invoice.id} raised`);
+    toast.success(`${sale.id} created from Grade B stock (${num(sale["qty"])} kg · ${fmtMoney(sale["value"])}) · PROF-${invoice.id} raised${remaining.length ? ` · ${po.id} still waiting: ${remaining.map((w) => `${w.p} ${w.waiting} kg`).join(", ")}` : ""}`);
   };
 
   const filtered = useMemo(
@@ -339,19 +372,26 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
       const returned = parseLines(r["item"]).filter((line) => line.q > 0);
       if (returned.length) r = { ...r, item: JSON.stringify(returned) };
     }
-    const full = normalize(mod.slug, { ...r, ...(mod.compute?.(r) ?? {}) } as Row);
+    let full = normalize(mod.slug, { ...r, ...(mod.compute?.(r) ?? {}) } as Row);
     const previous = rows.find((x) => x.id === full.id);
+    // Grade B buyer orders queue for stock first come, first served — stamp when the order was first booked.
+    if (mod.slug === "purchase-orders" && isGradeB(full) && !full["bookedAt"]) full = { ...full, bookedAt: String(previous?.["bookedAt"] || new Date().toISOString()) };
     if (mod.slug === "supplier-prices" && full.status === "Confirmed" && previous?.status !== "Priced" && previous?.status !== "Confirmed") {
       toast.error("Save complete supplier pricing as Priced before confirming it.");
       return;
     }
     if (mod.slug === "deliveries") return saveDelivery(full);
-    const err = mod.validate?.(full) || validateData({ ...data, [mod.slug]: rows.some(x => x.id === full.id) ? rows.map(x => x.id === full.id ? full : x) : [...rows, full] });
+    const err = mod.validate?.(full) || gradeBBookingError(data, mod.slug, full) || validateData({ ...data, [mod.slug]: rows.some(x => x.id === full.id) ? rows.map(x => x.id === full.id ? full : x) : [...rows, full] });
     if (err) { toast.error(err); return; }
     const isNew = !rows.some((x) => x.id === full.id);
     upsert(mod.slug, full);
     setEditing(null);
     toast.success(`${full.id} ${isNew ? "created" : "updated"}`);
+    if (mod.slug === "purchase-orders") {
+      const nextData = { ...data, [mod.slug]: isNew ? [...rows, full] : rows.map((x) => (x.id === full.id ? full : x)) };
+      const waiting = gradeBWaiting(nextData, full);
+      if (waiting.length) toast.warning(`${full.id} booked in queue · waiting for Grade B: ${waiting.map((w) => `${w.p} ${w.waiting} kg (${w.allocated} kg allocated)`).join(", ")}. Earlier bookings are served first; it fills as new Grade B is graded.`);
+    }
   };
 
   // Delivery rejects become a buyer return (Return DC) that later enters quarantine and Return QC.
@@ -400,7 +440,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
       ? { ...r, item: JSON.stringify(parseLines(r["item"]).map((l) => ({ ...l, ret: returnsAvailable(data, l.p, r.id) }))) }
       : r;
     const full = normalize(mod.slug, { ...withReturns, status: next } as Row);
-    const err = mod.validate?.(full) || validateData({ ...data, [mod.slug]: rows.some(x => x.id === full.id) ? rows.map(x => x.id === full.id ? full : x) : [...rows, full] });
+    const err = mod.validate?.(full) || gradeBBookingError(data, mod.slug, full) || validateData({ ...data, [mod.slug]: rows.some(x => x.id === full.id) ? rows.map(x => x.id === full.id ? full : x) : [...rows, full] });
     if (err) { toast.error(err); return; }
     upsert(mod.slug, full);
     toast.success(`${r.id} moved to “${next}”`);
@@ -705,9 +745,13 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                         {String(r[c.key] || DEFAULT_WAREHOUSE)}
                       </span>
                     ) : c.key === "__packets" ? (
-                      <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
-                        {totalPacketCount(r).toLocaleString("en-IN")} pkts
-                      </span>
+                      isGradeB(r) ? (
+                        <span className="text-xs text-muted-foreground" title="Grade B is sold loose in KG">— (KG)</span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                          {totalPacketCount(r).toLocaleString("en-IN")} pkts
+                        </span>
+                      )
                     ) : c.type === "products" ? (
                       mod.slug === "supplier-prices" ? (
                         <span className="text-muted-foreground">{parseLines(r[c.key]).length} products</span>
@@ -719,6 +763,8 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                           showPrices={canViewPrice(role)}
                         />
                       )
+                    ) : c.type === "date" ? (
+                      <DateTimeCell date={r[c.key]} at={c.key === "date" ? r["bookedAt"] || r["createdAt"] : undefined} />
                     ) : (
                       fmt(c, r[c.key], role)
                     )}
@@ -774,7 +820,16 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
                           >
                             <MessageCircle className="size-4" />
                           </Button>
-                          {saleForOrder(r) ? (
+                          {isGradeB(r) && gradeBWaiting(data, r).length > 0 && (
+                            <span
+                              className="self-center whitespace-nowrap rounded-md bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-800 dark:text-amber-300"
+                              title={`In the Grade B booking queue (first come, first served): ${gradeBWaiting(data, r).map((w) => `${w.p} ${w.allocated} kg allocated, ${w.waiting} kg waiting`).join("; ")}`}
+                            >
+                              {round(gradeBWaiting(data, r).reduce((s, w) => s + w.waiting, 0))} kg waiting
+                            </span>
+                          )}
+                          {/* A partly sold Grade B order stays open (Received/Accepted) so the rest can be sold when stock arrives. */}
+                          {saleForOrder(r) && !(isGradeB(r) && ["Received", "Accepted"].includes(r.status)) ? (
                             <span className="self-center whitespace-nowrap rounded-md bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
                               {saleForOrder(r)?.id}
                             </span>
@@ -993,7 +1048,7 @@ export function ModulePage({ mod }: { mod: ModuleDef }) {
         <GradeBSaleModal
           po={gradeBSaleRow}
           draftSale={directGradeBSale(gradeBSaleRow, data, nextId("sales-orders"))}
-          available={(product) => availableStock(data, "Grade B", product)}
+          available={(product) => gradeBFree(data, product, { po: gradeBSaleRow.id })}
           onConfirm={(saleLines) => createGradeBSale(gradeBSaleRow, saleLines)}
           onClose={() => setGradeBSaleRow(null)}
         />
@@ -1340,7 +1395,13 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                       }
                     }}
                     kgOnly={(mod.slug === "purchase-orders" || mod.slug === "sales-orders") && live["grade"] === "Grade B"}
-                    available={live["grade"] === "Grade B" ? (product) => availableStock(data, "Grade B", product) : undefined}
+                    available={live["grade"] === "Grade B" ? (product) => gradeBFree(data, product, mod.slug === "sales-orders" ? { sale: form.id, po: String(live["po"] || "") } : { po: form.id }) : undefined}
+                    bookings={mod.slug === "purchase-orders" && live["grade"] === "Grade B" ? (product) => {
+                      // Bookings queued ahead of this order (all of them for a new order).
+                      const queue = gradeBQueue(data, product);
+                      const own = queue.findIndex((b) => b.ref === form.id);
+                      return own === -1 ? queue : queue.slice(0, own);
+                    } : undefined}
                     grading={mod.slug === "quality-check"}
                     stage2={live.status === "Stage 2 done"}
                     returnsAvail={(p) => live["sourceType"] === "Return" ? 0 : returnsAvailable(data, p, form.id)}
@@ -1411,13 +1472,13 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                   {mod.slug === "sales-orders" && f.key === "po" && live["po"] && isGradeB(live) && (() => {
                     const poRef = (data["purchase-orders"] ?? []).find(x => x.id === live["po"]);
                     const poLines = poRef ? lines(poRef) : [];
-                    const availKg = round(poLines.reduce((sum, l) => sum + availableStock(data, "Grade B", l.p), 0));
+                    const availKg = round(poLines.reduce((sum, l) => sum + gradeBFree(data, l.p, { sale: form.id, po: poRef?.id ?? "" }), 0));
                     const poTotalKg = poLines.reduce((sum, l) => sum + l.q, 0);
                     return (
                       <div className="mt-2 rounded-xl border border-blue-500/25 bg-blue-500/5 p-2.5 text-xs space-y-1">
                         <div className="flex items-center justify-between">
                           <span className="font-semibold text-foreground flex items-center gap-1.5">
-                            <Boxes className="size-3.5 text-blue-600" /> Grade B Stock in Inventory:
+                            <Boxes className="size-3.5 text-blue-600" /> Free Grade B Stock:
                           </span>
                           <span className={cn("font-bold font-mono px-2 py-0.5 rounded text-xs", availKg > 0 ? "bg-blue-500/15 text-blue-700 dark:text-blue-300" : "bg-amber-500/15 text-amber-700 dark:text-amber-400")}>
                             {availKg} kg for {poTotalKg} kg demand
@@ -1426,7 +1487,7 @@ function FormDialog({ mod, row, onClose, onSave, isNew }: { mod: ModuleDef; row:
                         <p className="text-[11px] text-muted-foreground">
                           {availKg > 0
                             ? "Sale KG is capped to Grade B stock. Saving as Dispatched or Closed deducts it from Grade B inventory (Grade B ➔ Buyer)."
-                            : "⚠️ No Grade B stock for these products yet. Grade B is produced in Quality Check Stage 2."}
+                            : "⚠️ No free Grade B stock for these products — it is not graded yet or already booked for other buyers."}
                         </p>
                       </div>
                     );
@@ -1734,6 +1795,7 @@ function ProductPicker({
   priceEditable = true,
   kgOnly = false,
   available,
+  bookings,
 }: {
   options: string[];
   value: unknown;
@@ -1749,6 +1811,8 @@ function ProductPicker({
   /** Grade B buyer orders: loose KG only (no packets), with inventory available per product. */
   kgOnly?: boolean;
   available?: ((product: string) => number) | undefined;
+  /** Grade B buyer orders: other buyers' bookings ahead in the first-come, first-served queue. Orders beyond free stock wait instead of being blocked. */
+  bookings?: ((product: string) => GradeBBooking[]) | undefined;
 }) {
   const { catalog } = useStore();
   const [catalogPickerOpen, setCatalogPickerOpen] = useState(false);
@@ -1897,11 +1961,11 @@ function ProductPicker({
           {kgOnly && (
             allOptions.some((o) => (available?.(o) ?? 0) > 0) ? (
               <div className="mt-2 rounded-lg border border-blue-500/25 bg-blue-500/10 px-2.5 py-1.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
-                Grade B · loose KG from inventory. Products with Grade B stock are listed first.
+                Grade B · loose KG from inventory. Free KG = stock minus earlier bookings. Bookings are served first come, first served — KG beyond free stock is saved as waiting and filled as new Grade B is graded.
               </div>
             ) : (
               <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[10px] font-medium text-amber-800 dark:text-amber-300">
-                No Grade B stock in inventory yet. Grade B is produced in Quality Check Stage 2 — you can still record the order, and sell it once Grade B stock is graded.
+                No free Grade B stock right now (not graded yet or booked by earlier buyers). You can still book the order — it waits in the queue and fills as Grade B is graded in Quality Check Stage 2.
               </div>
             )
           )}
@@ -1976,7 +2040,7 @@ function ProductPicker({
                       )}
                       {kgOnly ? (
                         <span className={cn("rounded px-1.5 py-0.2 font-semibold", (available?.(o) ?? 0) > 0 ? "bg-blue-500/10 text-blue-700 dark:text-blue-300" : "bg-muted text-muted-foreground")}>
-                          Grade B stock: {(available?.(o) ?? 0).toLocaleString("en-IN")} kg
+                          Grade B free: {(available?.(o) ?? 0).toLocaleString("en-IN")} kg
                         </span>
                       ) : (
                         <span className="rounded bg-primary/10 px-1.5 py-0.2 font-semibold text-primary">
@@ -2108,10 +2172,22 @@ function ProductPicker({
                               <span className="text-muted-foreground shrink-0">{spec.category} ·</span>
                             )}
                             {kgOnly ? (
-                              <span className={cn("rounded-md px-2 py-0.5 font-bold", (available?.(l.p) ?? 0) >= l.q ? "bg-blue-500/10 text-blue-700 dark:text-blue-300" : "bg-destructive/10 text-destructive")}>
-                                Available: {(available?.(l.p) ?? 0).toLocaleString("en-IN")} kg
-                                {(available?.(l.p) ?? 0) < l.q && " · short"}
-                              </span>
+                              bookings ? (
+                                (available?.(l.p) ?? 0) >= l.q ? (
+                                  <span className="rounded-md bg-blue-500/10 px-2 py-0.5 font-bold text-blue-700 dark:text-blue-300">
+                                    Free: {(available?.(l.p) ?? 0).toLocaleString("en-IN")} kg · fully allocated
+                                  </span>
+                                ) : (
+                                  <span className="rounded-md bg-amber-500/15 px-2 py-0.5 font-bold text-amber-800 dark:text-amber-300" title="Saved in the booking queue; filled first come, first served as new Grade B is graded">
+                                    {Math.min(l.q, available?.(l.p) ?? 0).toLocaleString("en-IN")} kg allocated · {round(l.q - Math.min(l.q, available?.(l.p) ?? 0)).toLocaleString("en-IN")} kg waiting
+                                  </span>
+                                )
+                              ) : (
+                                <span className={cn("rounded-md px-2 py-0.5 font-bold", (available?.(l.p) ?? 0) >= l.q ? "bg-blue-500/10 text-blue-700 dark:text-blue-300" : "bg-destructive/10 text-destructive")}>
+                                  Free: {(available?.(l.p) ?? 0).toLocaleString("en-IN")} kg
+                                  {(available?.(l.p) ?? 0) < l.q && " · short"}
+                                </span>
+                              )
                             ) : (
                             <div className="relative inline-flex items-center">
                               <select
@@ -2134,6 +2210,25 @@ function ProductPicker({
                             </div>
                             )}
                           </div>
+                          {kgOnly && bookings && bookings(l.p).length > 0 && (
+                            <details className="mt-1 text-[10px]">
+                              <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                                Already booked by {bookings(l.p).length} other {bookings(l.p).length === 1 ? "booking" : "bookings"} · {round(bookings(l.p).reduce((s, b) => s + b.demand, 0)).toLocaleString("en-IN")} kg (served first)
+                              </summary>
+                              <ul className="mt-1 space-y-0.5 rounded-md border bg-muted/30 p-1.5">
+                                {bookings(l.p).map((b) => (
+                                  <li key={b.ref} className="flex items-center justify-between gap-2">
+                                    <span className="truncate">
+                                      <span className="font-mono font-semibold">{b.ref}</span> · {b.buyer} · {b.bookedAt.includes("T") ? new Date(b.bookedAt).toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" }) : b.bookedAt}
+                                    </span>
+                                    <span className="shrink-0 font-mono">
+                                      {b.allocated.toLocaleString("en-IN")} kg{b.waiting > 0 && <span className="text-amber-700 dark:text-amber-400"> + {b.waiting.toLocaleString("en-IN")} waiting</span>}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
                         </td>
 
                         {/* Packets / Count Input (Automatically calculates KG based on 250g / pack size) */}

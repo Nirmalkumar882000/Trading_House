@@ -3,7 +3,7 @@ import { Link } from '@tanstack/react-router';
 import { Boxes, Download, Search, ArrowRight, ArrowDownLeft, ArrowUpRight, RotateCcw, Package, CheckCircle2, AlertTriangle, Layers, MapPin, Building2, Eye } from 'lucide-react';
 import { Button } from './ui/button';
 import { useStore } from '@/lib/store';
-import { gradeBReserved, lines, movements, stock, warehouseFlowRows as getWarehouseFlowRows, type Category, type WarehouseFlowRow, locations } from '@/lib/workflow';
+import { gradeBCommittedTotal, lines, movements, stock, warehouseFlowRows as getWarehouseFlowRows, type Category, type WarehouseFlowRow, locations } from '@/lib/workflow';
 import { PRODUCT_CATALOG, type ModuleDef, type Row, WAREHOUSES, DEFAULT_WAREHOUSE } from '@/lib/modules';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -607,7 +607,7 @@ export function StockPage({ mod }: { mod: ModuleDef }) {
               </p>
               {c === 'Grade B' && (
                 <p className="text-[10px] font-medium text-blue-700 dark:text-blue-300 truncate" title="Grade B is sold loose in KG directly to buyers (no packing)">
-                  {kg(gradeBReserved(data))} reserved · direct sale
+                  {kg(gradeBCommittedTotal(data))} booked for buyers · direct sale
                 </p>
               )}
             </button>

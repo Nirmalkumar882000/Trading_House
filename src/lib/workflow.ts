@@ -257,6 +257,75 @@ export function gradeBReserved(data: Data, product?: string): number {
 export function availableStock(data: Data, category: Category, product: string, warehouse?: string): number {
   return Math.max(0, stock(data, warehouse).find(s => s.category === category && s.product.toLowerCase() === product.toLowerCase())?.qty || 0);
 }
+const OPEN_GRADE_B_PO = ['Received', 'Accepted'];
+const kgOf = (r: Row, product: string) => lines(r).filter(l => l.p.toLowerCase() === product.toLowerCase()).reduce((s, l) => s + l.q, 0);
+const OPEN_GRADE_B_SALE = ['Open', 'Confirmed'];
+/** Booking time of a Grade B order/sale; seeds without a timestamp fall back to their date. */
+export const gradeBBookedAt = (r: Row) => String(r['bookedAt'] || r['date'] || '');
+const refNo = (id: string) => Number(String(id).replace(/\D/g, '')) || 0;
+/** First come, first served: earlier booking time wins, then the lower reference number. */
+const byBooking = (a: Row, b: Row) => gradeBBookedAt(a).localeCompare(gradeBBookedAt(b)) || refNo(a.id) - refNo(b.id);
+const openGradeBSales = (data: Data) => (data['sales-orders'] || []).filter(sale => isGradeB(sale) && OPEN_GRADE_B_SALE.includes(sale.status));
+const openGradeBOrders = (data: Data) => (data['purchase-orders'] || []).filter(po => isGradeB(po) && OPEN_GRADE_B_PO.includes(po.status));
+/** Part of a buyer order not yet turned into a sale (a sale holds its own KG). */
+const unsoldKg = (data: Data, po: Row, product: string) =>
+  Math.max(0, round(kgOf(po, product) - (data['sales-orders'] || []).filter(sale => sale['po'] === po.id).reduce((t, sale) => t + kgOf(sale, product), 0)));
+/**
+ * Grade B KG ahead of a booking: open (Open/Confirmed) Grade B sales hold stock first, then the unsold part of
+ * open (Received/Accepted) Grade B buyer orders booked earlier. `exclude.po` is the order being booked/sold —
+ * only orders queued before it count; a new order not saved yet queues behind every existing one.
+ */
+export function gradeBCommitted(data: Data, product: string, exclude: { po?: string; sale?: string } = {}): number {
+  const target = exclude.po ? (data['purchase-orders'] || []).find(po => po.id === exclude.po) : undefined;
+  const openSales = openGradeBSales(data).filter(sale => sale.id !== exclude.sale).reduce((s, sale) => s + kgOf(sale, product), 0);
+  const openOrders = openGradeBOrders(data)
+    .filter(po => po.id !== exclude.po && (!target || byBooking(po, target) < 0))
+    .reduce((s, po) => s + unsoldKg(data, po, product), 0);
+  return round(openSales + openOrders);
+}
+export type GradeBBooking = { ref: string; kind: 'Sale' | 'Order'; buyer: string; bookedAt: string; demand: number; allocated: number; waiting: number };
+/** Booking queue for one product: who holds the Grade B stock, in time order, and how much each still waits for. */
+export function gradeBQueue(data: Data, product: string): GradeBBooking[] {
+  let left = availableStock(data, 'Grade B', product);
+  const take = (r: Row, kind: GradeBBooking['kind'], demand: number): GradeBBooking => {
+    const allocated = round(Math.min(left, demand)); left = round(left - allocated);
+    return { ref: r.id, kind, buyer: String(r['buyer'] || ''), bookedAt: gradeBBookedAt(r), demand, allocated, waiting: round(demand - allocated) };
+  };
+  const sales = [...openGradeBSales(data)].sort(byBooking).map(sale => [sale, kgOf(sale, product)] as const).filter(([, q]) => q > 0);
+  const orders = [...openGradeBOrders(data)].sort(byBooking).map(po => [po, unsoldKg(data, po, product)] as const).filter(([, q]) => q > 0);
+  return [...sales.map(([r, q]) => take(r, 'Sale', q)), ...orders.map(([r, q]) => take(r, 'Order', q))];
+}
+/** Per-product KG of a Grade B buyer order still waiting for stock (later bookings queue behind earlier ones). */
+export function gradeBWaiting(data: Data, po: Row): { p: string; allocated: number; waiting: number }[] {
+  if (!isGradeB(po) || !OPEN_GRADE_B_PO.includes(po.status)) return [];
+  return lines(po).map(l => {
+    const demand = unsoldKg(data, po, l.p);
+    const allocated = Math.min(demand, gradeBFree(data, l.p, { po: po.id }));
+    return { p: l.p, allocated: round(allocated), waiting: round(demand - allocated) };
+  }).filter(x => x.waiting > 0.001);
+}
+/** Total Grade B KG booked across all products (open buyer orders + undispatched sales). */
+export function gradeBCommittedTotal(data: Data): number {
+  const products = new Set([...(data['purchase-orders'] || []), ...(data['sales-orders'] || [])].filter(isGradeB).flatMap(r => lines(r).map(l => l.p.toLowerCase())));
+  return round([...products].reduce((s, p) => s + gradeBCommitted(data, p), 0));
+}
+/** Grade B KG still free to promise: inventory minus what other buyers already hold (orders + undispatched sales). */
+export function gradeBFree(data: Data, product: string, exclude: { po?: string; sale?: string } = {}): number {
+  return Math.max(0, round(availableStock(data, 'Grade B', product) - gradeBCommitted(data, product, exclude)));
+}
+/**
+ * Blocks a Grade B sale from taking more KG than is free for its order, so 6 kg can be sold 2 kg + 4 kg but never double-sold.
+ * Buyer orders are not blocked: they queue by booking time and wait for stock (see gradeBQueue / gradeBWaiting).
+ */
+export function gradeBBookingError(data: Data, slug: string, r: Row): string | null {
+  if (!isGradeB(r) || slug !== 'sales-orders' || !OPEN_GRADE_B_SALE.includes(r.status)) return null;
+  const exclude = { sale: r.id, po: String(r['po'] || '') };
+  for (const l of lines(r)) {
+    const free = gradeBFree(data, l.p, exclude);
+    if (l.q > free + 0.001) return `${l.p}: only ${free} kg Grade B is free (${availableStock(data, 'Grade B', l.p)} kg in stock, ${gradeBCommitted(data, l.p, exclude)} kg already booked for other buyers).`;
+  }
+  return null;
+}
 /** Warehouse holding the most Grade B KG for the given products, so a direct sale deducts where the stock is. */
 export function gradeBWarehouse(data: Data, products: string[]): string {
   let best: string = DEFAULT_WAREHOUSE || ''; let bestQty = 0;
@@ -847,7 +916,8 @@ export function populate(slug: string, key: string, value: string, form: Row, da
     const existingLines = lines(form);
     const ls = lines(ref).map(l=>{
       const open = round(l.q - sold.reduce((s,x)=>s+(lines(x).find(i=>i.p===l.p)?.q || 0),0));
-      const avail = packed.find(x=>x.product.toLowerCase()===l.p.toLowerCase())?.qty || 0;
+      // Grade B: only the KG not already booked by other buyers' orders / open sales.
+      const avail = gradeB ? gradeBFree(others, l.p, { po: String(value) }) : packed.find(x=>x.product.toLowerCase()===l.p.toLowerCase())?.qty || 0;
       const existing = existingLines.find(item => item.p === l.p);
       const saleRate = num(existing?.saleRate) > 0
         ? num(existing?.saleRate)

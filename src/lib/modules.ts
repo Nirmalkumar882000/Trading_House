@@ -661,7 +661,23 @@ export const getModule = (slug: string) => {
 };
 
 export function seedRows(m: ModuleDef): Row[] {
-  return m.seed.map((r, i) => ({ ...r, id: (r.id as string) || `${m.prefix}-${1001 + i}` }) as unknown as Row);
+  return m.seed.map((r, i) => ({ ...r, id: (r.id as string) || `${m.prefix}-${1001 + i}`, ...seedCreatedAt(r["date"], i) }) as unknown as Row);
+}
+
+/** Saved demo data from before entry times existed: give dated rows a demo entry time so tables show date and time. */
+export function withEntryTimes(data: Record<string, Row[]>): Record<string, Row[]> {
+  return Object.fromEntries(Object.entries(data).map(([slug, rows]) => [
+    slug,
+    Array.isArray(rows) ? rows.map((r, i) => (r["createdAt"] ? r : { ...r, ...seedCreatedAt(r["date"], i) })) : rows,
+  ]));
+}
+
+/** Demo entry time for seed rows with a business date: 09:00 plus 25 min per row, local time. */
+function seedCreatedAt(date: unknown, i: number): { createdAt?: string } {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date || ""));
+  if (!m) return {};
+  const minutes = 9 * 60 + ((i * 25) % (9 * 60));
+  return { createdAt: new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Math.floor(minutes / 60), minutes % 60).toISOString() };
 }
 
 export function ensureDirectoryDemoData(data: Record<string, Row[]>): Record<string, Row[]> {

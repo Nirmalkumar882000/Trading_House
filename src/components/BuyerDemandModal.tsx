@@ -2,7 +2,7 @@ import { X, MessageCircle, CheckCircle2, Package, Calendar, User } from "lucide-
 import { Button } from "./ui/button";
 import { type Row, PRODUCT_CATALOG } from "@/lib/modules";
 import { useStore } from "@/lib/store";
-import { parseLines } from "@/lib/workflow";
+import { isGradeB, parseLines } from "@/lib/workflow";
 import { StatusBadge } from "./StatusBadge";
 
 interface BuyerDemandModalProps {
@@ -22,6 +22,8 @@ export function BuyerDemandModal({ isOpen, onClose, row }: BuyerDemandModalProps
   const deliveryDate = String(row["deliveryDate"] || "—");
   const baseQty = lines.reduce((s, l) => s + (Number(l.q) || 0), 0);
   const totalQty = Number(row["qty"]) || (baseQty + extraKg);
+  // Grade B demand is sold loose in KG straight from Grade B stock — no packets.
+  const kgOnly = isGradeB(row);
 
   // Calculate packet breakdown based on product catalog
   const breakdown = lines.map((l) => {
@@ -50,7 +52,7 @@ export function BuyerDemandModal({ isOpen, onClose, row }: BuyerDemandModalProps
   // WhatsApp share link to Purchase Manager
   const handleWhatsAppShare = () => {
     const productSummary = breakdown
-      .map((b) => `• *${b.product}*: ${b.packetCount} packets (${b.packSize}) = ${b.qtyKg} kg`)
+      .map((b) => kgOnly ? `• *${b.product}*: ${b.qtyKg} kg` : `• *${b.product}*: ${b.packetCount} packets (${b.packSize}) = ${b.qtyKg} kg`)
       .join("\n");
     const extraSummary = extraKg > 0 ? `\n• *Extra Buyer Buffer Margin*: +${extraKg} kg (Base: ${baseQty} kg)` : "";
 
@@ -61,8 +63,9 @@ export function BuyerDemandModal({ isOpen, onClose, row }: BuyerDemandModalProps
       `*PO Date:* ${poDate}\n` +
       `*Delivery Date:* ${deliveryDate}\n` +
       `*Status:* ${row.status}\n\n` +
-      `*Demand in Packets & Count:*\n${productSummary}${extraSummary}\n\n` +
-      `*Total Demand:* ${totalQty.toLocaleString("en-IN")} kg (${totalPackets.toLocaleString("en-IN")} pkts)\n` +
+      (kgOnly ? `*Grade:* Grade B (loose KG)\n\n*Demand in KG:*\n` : `*Demand in Packets & Count:*\n`) +
+      `${productSummary}${extraSummary}\n\n` +
+      `*Total Demand:* ${totalQty.toLocaleString("en-IN")} kg${kgOnly ? "" : ` (${totalPackets.toLocaleString("en-IN")} pkts)`}\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `_Purchase Manager, please arrange market procurement and truck loading for this demand._`;
 
@@ -83,7 +86,9 @@ export function BuyerDemandModal({ isOpen, onClose, row }: BuyerDemandModalProps
               <StatusBadge status={row.status} statuses={["Received", "Accepted", "Converted", "Rejected"]} />
             </div>
             <h2 className="text-xl font-bold text-foreground">Buyer Demand Breakdown</h2>
-            <p className="text-xs text-muted-foreground">Demand in Packets, Count, Product Name, Buyer Name & Date</p>
+            <p className="text-xs text-muted-foreground">
+              {kgOnly ? "Grade B · Demand in KG, Product Name, Buyer Name & Date" : "Demand in Packets, Count, Product Name, Buyer Name & Date"}
+            </p>
           </div>
           <Button variant="ghost" size="icon" onClick={onClose} className="rounded-full">
             <X className="size-4" />
@@ -91,7 +96,7 @@ export function BuyerDemandModal({ isOpen, onClose, row }: BuyerDemandModalProps
         </div>
 
         {/* PO Highlights Banner */}
-        <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 rounded-xl bg-muted/40 p-3.5 border text-xs">
+        <div className={`mt-4 grid grid-cols-2 ${kgOnly ? "sm:grid-cols-3" : "sm:grid-cols-4"} gap-3 rounded-xl bg-muted/40 p-3.5 border text-xs`}>
           <div>
             <span className="text-muted-foreground block text-[11px] font-medium flex items-center gap-1">
               <User className="size-3" /> Buyer Name
@@ -113,28 +118,30 @@ export function BuyerDemandModal({ isOpen, onClose, row }: BuyerDemandModalProps
               {extraKg > 0 && <span className="text-[11px] font-normal text-muted-foreground ml-1">(incl. +{extraKg} kg buffer)</span>}
             </span>
           </div>
-          <div>
-            <span className="text-muted-foreground block text-[11px] font-medium flex items-center gap-1">
-              <CheckCircle2 className="size-3" /> Packet Count
-            </span>
-            <span className="font-semibold text-emerald-600 dark:text-emerald-400 text-sm mt-0.5 block">
-              {totalPackets.toLocaleString("en-IN")} pkts
-            </span>
-          </div>
+          {!kgOnly && (
+            <div>
+              <span className="text-muted-foreground block text-[11px] font-medium flex items-center gap-1">
+                <CheckCircle2 className="size-3" /> Packet Count
+              </span>
+              <span className="font-semibold text-emerald-600 dark:text-emerald-400 text-sm mt-0.5 block">
+                {totalPackets.toLocaleString("en-IN")} pkts
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Breakdown Table */}
         <div className="mt-5 space-y-2">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Product Packet Breakdown
+            {kgOnly ? "Product KG Breakdown (Grade B · Loose)" : "Product Packet Breakdown"}
           </h3>
           <div className="overflow-x-auto rounded-xl border">
             <table className="w-full text-sm">
               <thead className="bg-muted/60 text-xs font-semibold text-muted-foreground">
                 <tr>
                   <th className="px-3.5 py-2.5 text-left">Product Name</th>
-                  <th className="px-3.5 py-2.5 text-left">Demand in Packet</th>
-                  <th className="px-3.5 py-2.5 text-right">Pack Count</th>
+                  {!kgOnly && <th className="px-3.5 py-2.5 text-left">Demand in Packet</th>}
+                  {!kgOnly && <th className="px-3.5 py-2.5 text-right">Pack Count</th>}
                   <th className="px-3.5 py-2.5 text-right">Demand (KG)</th>
                 </tr>
               </thead>
@@ -147,14 +154,18 @@ export function BuyerDemandModal({ isOpen, onClose, row }: BuyerDemandModalProps
                         <span>{item.product}</span>
                       </div>
                     </td>
-                    <td className="px-3.5 py-3 text-muted-foreground">
-                      <span className="rounded-md bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground">
-                        {item.packSize}
-                      </span>
-                    </td>
-                    <td className="px-3.5 py-3 text-right font-mono font-semibold tabular-nums text-foreground">
-                      {item.packetCount.toLocaleString("en-IN")} pkts
-                    </td>
+                    {!kgOnly && (
+                      <td className="px-3.5 py-3 text-muted-foreground">
+                        <span className="rounded-md bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground">
+                          {item.packSize}
+                        </span>
+                      </td>
+                    )}
+                    {!kgOnly && (
+                      <td className="px-3.5 py-3 text-right font-mono font-semibold tabular-nums text-foreground">
+                        {item.packetCount.toLocaleString("en-IN")} pkts
+                      </td>
+                    )}
                     <td className="px-3.5 py-3 text-right font-mono tabular-nums font-medium text-foreground">
                       {item.qtyKg.toLocaleString("en-IN")} kg
                     </td>
@@ -164,22 +175,24 @@ export function BuyerDemandModal({ isOpen, onClose, row }: BuyerDemandModalProps
               <tfoot className="bg-muted/40 font-semibold text-xs border-t">
                 {extraKg > 0 && (
                   <tr className="bg-amber-500/10 text-amber-900 dark:text-amber-200 border-t">
-                    <td className="px-3.5 py-2 font-medium" colSpan={2}>
+                    <td className="px-3.5 py-2 font-medium" colSpan={kgOnly ? 1 : 2}>
                       ➕ Extra Buyer Buffer / Margin
                     </td>
-                    <td className="px-3.5 py-2 text-right font-mono text-muted-foreground">—</td>
+                    {!kgOnly && <td className="px-3.5 py-2 text-right font-mono text-muted-foreground">—</td>}
                     <td className="px-3.5 py-2 text-right font-mono font-semibold text-amber-700 dark:text-amber-400">
                       +{extraKg.toLocaleString("en-IN")} kg
                     </td>
                   </tr>
                 )}
                 <tr>
-                  <td className="px-3.5 py-2.5" colSpan={2}>
+                  <td className="px-3.5 py-2.5" colSpan={kgOnly ? 1 : 2}>
                     Total Demand ({breakdown.length} products{extraKg > 0 ? ` + ${extraKg} kg extra` : ""})
                   </td>
-                  <td className="px-3.5 py-2.5 text-right font-mono text-emerald-600 dark:text-emerald-400">
-                    {totalPackets.toLocaleString("en-IN")} pkts
-                  </td>
+                  {!kgOnly && (
+                    <td className="px-3.5 py-2.5 text-right font-mono text-emerald-600 dark:text-emerald-400">
+                      {totalPackets.toLocaleString("en-IN")} pkts
+                    </td>
+                  )}
                   <td className="px-3.5 py-2.5 text-right font-mono text-primary font-bold">
                     {totalQty.toLocaleString("en-IN")} kg
                   </td>

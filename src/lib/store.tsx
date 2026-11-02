@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { MODULES, seedRows, ensureDirectoryDemoData, type Row, INITIAL_PRODUCT_CATALOG, syncProductCatalog, type ProductItem } from "./modules";
+import { MODULES, seedRows, ensureDirectoryDemoData, withEntryTimes, type Row, INITIAL_PRODUCT_CATALOG, syncProductCatalog, type ProductItem } from "./modules";
 import { normalize, syncReceiptContainers, syncReceiptDownstream } from "./workflow";
 import type { UserRole } from "./rbac";
 
@@ -60,7 +60,7 @@ const load = (): Data => {
       return demo;
     }
     const parsed = JSON.parse(raw) as Data;
-    let merged = ensureDirectoryDemoData({ ...demoInitial(), ...parsed });
+    let merged = withEntryTimes(ensureDirectoryDemoData({ ...demoInitial(), ...parsed }));
     if (merged["receipts"]) {
       for (const r of merged["receipts"]) {
         if (Number(r["containerCount"]) > 0) {
@@ -177,7 +177,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     upsert: (slug, row) =>
       setData((d) => {
         const list = d[slug] ?? [];
-        const full = normalize(slug, row);
+        const stored = list.find((r) => r.id === row.id);
+        // Entry time shown beside the business date in every table; kept from the first save.
+        const full = normalize(slug, { ...row, createdAt: String(stored?.["createdAt"] || row["createdAt"] || new Date().toISOString()) });
         const exists = list.some((r) => r.id === full.id);
         let next = { ...d, [slug]: exists ? list.map((r) => (r.id === full.id ? full : r)) : [full, ...list] };
         if (slug === "receipts") {
