@@ -6,8 +6,10 @@ import type { UserRole } from "./rbac";
 type Data = Record<string, Row[]>;
 const STORAGE_KEY = "trading-house-data";
 const ROLE_STORAGE_KEY = "trading-house-role";
-const CLEAN_VERSION_KEY = "trading-house-portal-clean-v11";
+const CLEAN_VERSION_KEY = "trading-house-portal-clean-v12";
 const CATALOG_STORAGE_KEY = "trading-house-product-catalog";
+
+export const getDemoData = (): Data => demoInitial();
 
 const loadCatalog = (): ProductItem[] => {
   try {
@@ -60,7 +62,9 @@ const load = (): Data => {
       return demo;
     }
     const parsed = JSON.parse(raw) as Data;
-    let merged = withEntryTimes(ensureDirectoryDemoData({ ...demoInitial(), ...parsed }));
+    const hasAnyRecords = Object.values(parsed).some((arr) => Array.isArray(arr) && arr.length > 0);
+    const sourceData = hasAnyRecords ? { ...demoInitial(), ...parsed } : demoInitial();
+    let merged = withEntryTimes(ensureDirectoryDemoData(sourceData));
     if (merged["receipts"]) {
       for (const r of merged["receipts"]) {
         if (Number(r["containerCount"]) > 0) {
@@ -95,7 +99,7 @@ interface Ctx {
 const StoreCtx = createContext<Ctx | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [data, setData] = useState<Data>(initial);
+  const [data, setData] = useState<Data>(load);
   const [role, setRoleState] = useState<UserRole>("Admin");
   const [catalog, setCatalogState] = useState<ProductItem[]>(loadCatalog);
   const hydrated = useRef(false);
